@@ -1,0 +1,12 @@
+[package]
+name = "aggit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aws-config = { version = "1.8.15", features = ["behavior-version-latest"] }
+aws-sdk-s3 = { version = "1.129.0", features = ["rt-tokio"] }
+anyhow = "1.0.102"
+sha1-checked = "0.10.0"
+hex = "0.4.3"
+flate2 = "1.1.9"
