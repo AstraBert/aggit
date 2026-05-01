@@ -7,16 +7,16 @@ use flate2::{
     read::{ZlibDecoder, ZlibEncoder},
 };
 use sha1_checked::{Digest, Sha1};
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::{Cursor, Read};
+use std::{collections::HashMap, os::unix::fs::MetadataExt};
 use std::{fmt, fs, path::PathBuf, str::FromStr};
 use walkdir::WalkDir;
 
 const HASH_SEPARATOR: &str = "\x00";
 
 /// Data for one entry in the git index (.git/index)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IndexEntry {
     /// ctime seconds (Unix timestamp)
     ctime_s: u32,
@@ -552,5 +552,47 @@ pub fn write_index(entries: &[IndexEntry]) -> anyhow::Result<()> {
     data.extend_from_slice(&digest);
 
     write_file(&std::path::PathBuf::from(".git/index"), data)?;
+    Ok(())
+}
+
+/// Add all file paths to git index.
+pub fn add(paths: Vec<String>) -> anyhow::Result<()> {
+    let replaced: Vec<String> = paths.iter().map(|p| p.replace("\\", "/")).collect();
+    let all_entries = read_index()?;
+    let mut entries: Vec<IndexEntry> = all_entries
+        .iter()
+        .filter(|e| !replaced.contains(&e.path))
+        .map(|e| e.clone())
+        .collect();
+    for path in replaced {
+        let mut data = read_file(&PathBuf::from(&path))?;
+        let sha1 = hash_object(&mut data, ObjectTipe::Blob, false)?;
+        let st = fs::metadata(&path)?;
+        let flags = path.as_bytes().len() as u16;
+        if !(flags < (1 << 12)) {
+            return Err(anyhow!("Invalid flags"));
+        }
+        let sha1_bytes: [u8; 20] = hex::decode(&sha1)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("SHA1 hash must be 20 bytes"))?;
+        let entry = IndexEntry {
+            ctime_s: st.ctime() as u32,
+            ctime_n: st.ctime_nsec() as u32,
+            mtime_n: st.mtime() as u32,
+            mtime_s: st.mtime_nsec() as u32,
+            dev: st.dev() as u32,
+            ino: st.ino() as u32,
+            size: st.size() as u32,
+            gid: st.gid(),
+            uid: st.uid(),
+            mode: st.mode(),
+            flags,
+            sha1: sha1_bytes,
+            path,
+        };
+        entries.push(entry);
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    write_index(entries.as_slice())?;
     Ok(())
 }
