@@ -6,30 +6,35 @@ use flate2::{
     Compression,
     read::{ZlibDecoder, ZlibEncoder},
 };
+use serde::{Deserialize, Serialize};
 use sha1_checked::{Digest, Sha1};
-use std::collections::HashSet;
-use std::io::{Cursor, Read};
 use std::{collections::HashMap, os::unix::fs::MetadataExt};
+use std::{collections::HashSet, time::SystemTime};
 use std::{fmt, fs, path::PathBuf, str::FromStr};
+use std::{
+    io::{Cursor, Read},
+    time::UNIX_EPOCH,
+};
+use time::UtcOffset;
 use walkdir::WalkDir;
 
 const HASH_SEPARATOR: &str = "\x00";
 
-/// Data for one entry in the git index (.git/index)
+/// Data for one entry in the git index (.aggit/index)
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
     /// ctime seconds (Unix timestamp)
-    ctime_s: u32,
+    ctime_s: i64,
     /// ctime in nanoseconds
-    ctime_n: u32,
+    ctime_n: i64,
     /// mtime seconds (Unix timestamp)
-    mtime_s: u32,
+    mtime_s: i64,
     /// mtime in nanoseconds
-    mtime_n: u32,
+    mtime_n: i64,
     /// Device number
-    dev: u32,
+    dev: u64,
     /// Inode number
-    ino: u32,
+    ino: u64,
     /// File mode/permissions
     mode: u32,
     /// Owner user ID
@@ -37,13 +42,25 @@ pub struct IndexEntry {
     /// Owner group ID
     gid: u32,
     /// File size in bytes
-    size: u32,
+    size: u64,
     /// 20-bytes raw SHA1 hash
     sha1: [u8; 20],
     /// Git index flags
     flags: u16,
     /// File path relative to the repo root
     path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CommitAuthor {
+    name: String,
+    email: String,
+}
+
+impl fmt::Display for CommitAuthor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} <{}>", self.name, self.email)
+    }
 }
 
 /// Object type enum. There are other types too, but we don't need them.
@@ -117,16 +134,16 @@ fn write_file(path: &PathBuf, data: Vec<u8>) -> Result<(), std::io::Error> {
     fs::write(path, data)
 }
 
-/// Create directory for repo (if it does not already exist) and initialize .git directory
+/// Create directory for repo (if it does not already exist) and initialize .aggit directory
 pub fn init(repository: PathBuf) -> Result<(), std::io::Error> {
     fs::create_dir_all(&repository)?;
-    fs::create_dir_all(&repository.join(".git"))?;
+    fs::create_dir_all(&repository.join(".aggit"))?;
     let git_folders: [&str; 3] = ["object", "refs", "refs/heads"];
     for g in git_folders {
-        fs::create_dir_all(&repository.join(".git").join(g))?;
+        fs::create_dir_all(&repository.join(".aggit").join(g))?;
     }
     write_file(
-        &repository.join(".git").join("HEAD"),
+        &repository.join(".aggit").join("HEAD"),
         "ref: refs/heads/main".into(),
     )?;
     println!(
@@ -161,7 +178,7 @@ pub fn hash_object(
     full_data.append(data);
     let sha1 = hex::encode(Sha1::digest(&full_data));
     if write {
-        let path = PathBuf::from(".git")
+        let path = PathBuf::from(".aggit")
             .join("objects")
             .join(&sha1[..2])
             .join(&sha1[2..]);
@@ -182,7 +199,7 @@ pub fn find_object(sha1_prefix: &str) -> anyhow::Result<PathBuf> {
     if sha1_prefix.len() < 2 {
         return Err(anyhow!("Invalid SHA1 prefix (less than 2 letters)"));
     }
-    let obj_dir = PathBuf::from(".git")
+    let obj_dir = PathBuf::from(".aggit")
         .join("objects")
         .join(&sha1_prefix[..2]);
     let rest = &sha1_prefix[2..];
@@ -289,7 +306,17 @@ pub fn cat_file(mode: &str, sha1_prefix: &str) -> anyhow::Result<()> {
                 obj_data.1.as_slice().read_to_string(&mut str_data)?;
                 println!("{}", str_data);
             }
-            ObjectTipe::Tree => {} // TODO: handle tree when read_tree function is ready
+            ObjectTipe::Tree => {
+                let tree_objs = read_tree(None, Some(obj_data.1))?;
+                for (mode, path, sha1) in tree_objs {
+                    let type_str = if (mode & 0o170000) == 0o040000 {
+                        "tree"
+                    } else {
+                        "blob"
+                    };
+                    println!("{:#o} {} {}\t{}", mode, type_str, sha1, path);
+                }
+            } // TODO: handle tree when read_tree function is ready
         },
     }
     Ok(())
@@ -297,7 +324,7 @@ pub fn cat_file(mode: &str, sha1_prefix: &str) -> anyhow::Result<()> {
 
 /// Read git index file and return list of IndexEntry objects.
 pub fn read_index() -> anyhow::Result<Vec<IndexEntry>> {
-    let data = match read_file(&PathBuf::from(".git/index")) {
+    let data = match read_file(&PathBuf::from(".aggit/index")) {
         Ok(d) => d,
         Err(_) => return Ok(vec![]),
     };
@@ -323,16 +350,16 @@ pub fn read_index() -> anyhow::Result<Vec<IndexEntry>> {
     while (cursor.position() as usize) + 62 < body.len() {
         let entry_start = cursor.position() as usize;
 
-        let ctime_s = cursor.read_u32::<BigEndian>()?;
-        let ctime_n = cursor.read_u32::<BigEndian>()?;
-        let mtime_s = cursor.read_u32::<BigEndian>()?;
-        let mtime_n = cursor.read_u32::<BigEndian>()?;
-        let dev = cursor.read_u32::<BigEndian>()?;
-        let ino = cursor.read_u32::<BigEndian>()?;
+        let ctime_s = cursor.read_i64::<BigEndian>()?;
+        let ctime_n = cursor.read_i64::<BigEndian>()?;
+        let mtime_s = cursor.read_i64::<BigEndian>()?;
+        let mtime_n = cursor.read_i64::<BigEndian>()?;
+        let dev = cursor.read_u64::<BigEndian>()?;
+        let ino = cursor.read_u64::<BigEndian>()?;
         let mode = cursor.read_u32::<BigEndian>()?;
         let uid = cursor.read_u32::<BigEndian>()?;
         let gid = cursor.read_u32::<BigEndian>()?;
-        let size = cursor.read_u32::<BigEndian>()?;
+        let size = cursor.read_u64::<BigEndian>()?;
 
         let mut sha1 = [0u8; 20];
         cursor.read_exact(&mut sha1)?;
@@ -400,7 +427,7 @@ pub fn ls_files(details: bool) -> anyhow::Result<()> {
 pub fn get_status() -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let mut paths: HashSet<String> = HashSet::new();
     let walker = WalkDir::new(".").into_iter();
-    for entry in walker.filter_entry(|e| e.file_name().to_str().unwrap_or_default() != ".git") {
+    for entry in walker.filter_entry(|e| e.file_name().to_str().unwrap_or_default() != ".aggit") {
         let entry = entry?;
         let path = entry.into_path();
         if path.is_file() {
@@ -526,16 +553,16 @@ pub fn write_index(entries: &[IndexEntry]) -> anyhow::Result<()> {
 
     // Pack each entry
     for entry in entries {
-        data.write_u32::<BigEndian>(entry.ctime_s)?;
-        data.write_u32::<BigEndian>(entry.ctime_n)?;
-        data.write_u32::<BigEndian>(entry.mtime_s)?;
-        data.write_u32::<BigEndian>(entry.mtime_n)?;
-        data.write_u32::<BigEndian>(entry.dev)?;
-        data.write_u32::<BigEndian>(entry.ino)?;
+        data.write_i64::<BigEndian>(entry.ctime_s)?;
+        data.write_i64::<BigEndian>(entry.ctime_n)?;
+        data.write_i64::<BigEndian>(entry.mtime_s)?;
+        data.write_i64::<BigEndian>(entry.mtime_n)?;
+        data.write_u64::<BigEndian>(entry.dev)?;
+        data.write_u64::<BigEndian>(entry.ino)?;
         data.write_u32::<BigEndian>(entry.mode)?;
         data.write_u32::<BigEndian>(entry.uid)?;
         data.write_u32::<BigEndian>(entry.gid)?;
-        data.write_u32::<BigEndian>(entry.size)?;
+        data.write_u64::<BigEndian>(entry.size)?;
         data.extend_from_slice(&entry.sha1);
         data.write_u16::<BigEndian>(entry.flags)?;
 
@@ -551,7 +578,7 @@ pub fn write_index(entries: &[IndexEntry]) -> anyhow::Result<()> {
     let digest = Sha1::digest(&data);
     data.extend_from_slice(&digest);
 
-    write_file(&std::path::PathBuf::from(".git/index"), data)?;
+    write_file(&std::path::PathBuf::from(".aggit/index"), data)?;
     Ok(())
 }
 
@@ -576,13 +603,13 @@ pub fn add(paths: Vec<String>) -> anyhow::Result<()> {
             .try_into()
             .map_err(|_| anyhow::anyhow!("SHA1 hash must be 20 bytes"))?;
         let entry = IndexEntry {
-            ctime_s: st.ctime() as u32,
-            ctime_n: st.ctime_nsec() as u32,
-            mtime_n: st.mtime() as u32,
-            mtime_s: st.mtime_nsec() as u32,
-            dev: st.dev() as u32,
-            ino: st.ino() as u32,
-            size: st.size() as u32,
+            ctime_s: st.ctime(),
+            ctime_n: st.ctime_nsec(),
+            mtime_n: st.mtime(),
+            mtime_s: st.mtime_nsec(),
+            dev: st.dev(),
+            ino: st.ino(),
+            size: st.size(),
             gid: st.gid(),
             uid: st.uid(),
             mode: st.mode(),
@@ -595,4 +622,157 @@ pub fn add(paths: Vec<String>) -> anyhow::Result<()> {
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     write_index(entries.as_slice())?;
     Ok(())
+}
+
+/// Read tree object with given SHA-1 (hex string) or data, and return list
+/// of (mode, path, sha1) tuples.
+pub fn read_tree(
+    sha1: Option<String>,
+    data: Option<Vec<u8>>,
+) -> anyhow::Result<Vec<(u32, String, String)>> {
+    let actual_data;
+    if let Some(sh) = sha1 {
+        let (obj_type, data) = read_object(&sh)?;
+        actual_data = data;
+        match obj_type {
+            ObjectTipe::Tree => {}
+            _ => return Err(anyhow!("Expected object type to be 'tree'")),
+        }
+    } else if let Some(d) = data {
+        actual_data = d;
+    } else {
+        return Err(anyhow!(
+            "At least one between SHA1 and data should be non-null"
+        ));
+    }
+    let mut i = 0;
+    let mut entries = Vec::new();
+    while i < 1000 {
+        let end_v: Vec<usize> = actual_data
+            .iter()
+            .enumerate()
+            .filter(|(j, x)| *j >= i && **x == HASH_SEPARATOR.as_bytes()[0])
+            .map(|(i, _)| i)
+            .collect();
+        if !end_v.is_empty() {
+            let e = end_v[0];
+            let mut subset = &actual_data[i..e];
+            let mut sub_str = String::new();
+            subset.read_to_string(&mut sub_str)?;
+            let split: Vec<String> = sub_str
+                .split_ascii_whitespace()
+                .map(|s| s.to_owned())
+                .collect();
+            if split.len() != 2 {
+                return Err(anyhow!(
+                    "Expected string to be split in exactly two pieces (mode, path)"
+                ));
+            }
+            let mode = split[0].parse::<u32>()?;
+            let digest = &actual_data[e + 1..e + 21];
+            let sha1 = hex::encode(digest);
+            entries.push((mode, split[1].clone(), sha1));
+            i = e + 1 + 20;
+        } else {
+            // not find, break
+            break;
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Write a tree object from the current index entries.
+pub fn write_tree() -> anyhow::Result<String> {
+    let mut tree_entries = Vec::new();
+    let entries = read_index()?;
+    for entry in entries {
+        if entry.path.contains("/") {
+            return Err(anyhow!(
+                "Currently supports only a single, top-level directory"
+            ));
+        }
+        let mut tree_entry = format!("{:#o} {}", entry.mode, entry.path).into_bytes();
+        tree_entry.append(&mut HASH_SEPARATOR.to_string().into_bytes());
+        tree_entry.append(&mut entry.sha1.to_vec());
+        tree_entries.append(&mut tree_entry);
+    }
+    hash_object(&mut tree_entries, ObjectTipe::Tree, false)
+}
+
+/// Get current commit hash (SHA-1 string) of local main branch.
+pub fn get_local_main_hash() -> anyhow::Result<Option<String>> {
+    let main_path = PathBuf::from(".aggit")
+        .join("refs")
+        .join("heads")
+        .join("master");
+    let result = read_file(&main_path);
+    match result {
+        Ok(d) => {
+            let mut content = String::new();
+            d.as_slice().read_to_string(&mut content)?;
+            content = content.trim().to_string();
+            Ok(Some(content))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+pub fn config_author(name: String, email: String) -> anyhow::Result<()> {
+    let config_file = dirs::config_dir()
+        .expect("Should have a global config dir")
+        .join(".aggit")
+        .join("author.toml");
+    let author = CommitAuthor { name, email };
+    let toml_str = toml::to_string(&author)?;
+    fs::write(config_file, toml_str)?;
+    Ok(())
+}
+
+pub fn read_author() -> anyhow::Result<CommitAuthor> {
+    let config_file = dirs::config_dir()
+        .expect("Should have a global config dir")
+        .join(".aggit")
+        .join("author.toml");
+    let content = fs::read_to_string(config_file)?;
+    let author: CommitAuthor = toml::from_str(&content)?;
+    Ok(author)
+}
+
+/// Commit the current state of the index to master with given message.
+/// Return hash of commit object.
+pub fn commit(message: &str) -> anyhow::Result<String> {
+    let tree = write_tree()?;
+    let parent = get_local_main_hash()?;
+    let author = read_author()?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let offset = UtcOffset::current_local_offset().unwrap();
+    let total_seconds = offset.whole_seconds();
+    let sign = if total_seconds >= 0 { '+' } else { '-' };
+    let hours = total_seconds.abs() / 3600;
+    let minutes = (total_seconds.abs() / 60) % 60;
+
+    let author_time = format!("{} {}{:02}{:02}", timestamp, sign, hours, minutes);
+    let mut lines = vec!["tree ".to_string() + &tree];
+    if let Some(par) = parent {
+        lines.push("parent ".to_string() + &par);
+    }
+    lines.push(format!("author {} {}", author, author_time));
+    lines.push(format!("committer {} {}", author, author_time));
+    lines.push(String::new());
+    lines.push(message.to_string());
+    lines.push(String::new());
+    let mut data = lines.join("\n").into_bytes();
+    let sha1 = hash_object(&mut data, ObjectTipe::Commit, false)?;
+    let main_path = PathBuf::from(".aggit")
+        .join("refs")
+        .join("heads")
+        .join("main");
+    write_file(&main_path, data)?;
+    println!("Committed to main: {}", &sha1[..7]);
+    Ok(sha1)
 }
