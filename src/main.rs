@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::gitops::{config_author, init, status};
+use crate::gitops::{
+    add, cat_file, commit, config_author, diff, init, ls_files, status, switch_branch,
+};
 
 #[derive(Parser)]
 struct CliArgs {
@@ -75,6 +77,18 @@ enum Commands {
         #[arg(short, long, default_value_t = false)]
         details: bool,
     },
+
+    /// Show diff of files changed (between index and working copy).
+    Diff {},
+
+    /// Switch to a different branch.
+    ///
+    /// If `--create/-c` is provided and the target branch does not exist, create it from the current branch and commit.
+    Switch {
+        name: String,
+        #[arg(short, long, default_value_t = false)]
+        create: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -88,6 +102,24 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Author { name, email } => {
             config_author(name, email)?;
+        }
+        Commands::Cat { mode, sha1 } => {
+            cat_file(&mode, &sha1)?;
+        }
+        Commands::Ls { details } => {
+            ls_files(details)?;
+        }
+        Commands::Add { files } => {
+            add(files)?;
+        }
+        Commands::Commit { message } => {
+            commit(&message)?;
+        }
+        Commands::Diff {} => {
+            diff()?;
+        }
+        Commands::Switch { name, create } => {
+            switch_branch(&name, create)?;
         }
     }
 
