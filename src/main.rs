@@ -1,4 +1,5 @@
 mod gitops;
+mod s3ops;
 
 use std::path::PathBuf;
 
