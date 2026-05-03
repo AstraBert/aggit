@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::gitops::{
-    add, cat_file, commit, config_author, diff, init, ls_files, status, switch_branch,
+    add, cat_file, commit, config_author, diff, init, list_branches, ls_files, status,
+    switch_branch,
 };
 
 #[derive(Parser)]
@@ -89,6 +90,9 @@ enum Commands {
         #[arg(short, long, default_value_t = false)]
         create: bool,
     },
+
+    /// View current branch an all active local branches
+    Branch {},
 }
 
 fn main() -> anyhow::Result<()> {
@@ -120,6 +124,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Switch { name, create } => {
             switch_branch(&name, create)?;
+        }
+        Commands::Branch {} => {
+            list_branches()?;
         }
     }
 

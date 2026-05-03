@@ -868,6 +868,22 @@ fn get_current_branch() -> anyhow::Result<String> {
     Ok(branch.to_string())
 }
 
+pub fn list_branches() -> anyhow::Result<()> {
+    let current_branch = get_current_branch()?;
+    let entries = fs::read_dir(PathBuf::from(".aggit").join("refs").join("heads"))?;
+    let mut other_branches = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if &entry.file_name().to_str().unwrap() != &current_branch {
+            other_branches.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    other_branches.insert(0, format!("\x1b[1;32m* {}\x1b[1;37m", current_branch));
+    println!("{}", other_branches.join("\n"));
+
+    Ok(())
+}
+
 fn index_path_for_branch(branch: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(".aggit/refs/index/{}", branch))
 }
