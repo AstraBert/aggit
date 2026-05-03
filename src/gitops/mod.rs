@@ -9,7 +9,11 @@ use flate2::{
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sha1_checked::{Digest, Sha1};
-use std::{collections::HashMap, os::unix::fs::MetadataExt};
+use std::{
+    collections::HashMap,
+    fs::Permissions,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+};
 use std::{collections::HashSet, time::SystemTime};
 use std::{fmt, fs, path::PathBuf, str::FromStr};
 use std::{
@@ -20,8 +24,7 @@ use time::UtcOffset;
 
 const HASH_SEPARATOR: &str = "\x00";
 
-/// Data for one entry in the git index (.aggit/index)
-// TODO: add branch attribute
+/// Data for one entry in the git index (.aggit/refs/{branch}/index)
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
     /// ctime seconds (Unix timestamp)
@@ -67,13 +70,13 @@ impl fmt::Display for CommitAuthor {
 /// Object type enum. There are other types too, but we don't need them.
 /// See "enum object_type" in git's source (git/cache.h).
 #[derive(PartialEq, Eq, Debug)]
-pub enum ObjectTipe {
+pub enum ObjectType {
     Commit,
     Tree,
     Blob,
 }
 
-impl fmt::Display for ObjectTipe {
+impl fmt::Display for ObjectType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Self::Blob => "blob",
@@ -84,7 +87,7 @@ impl fmt::Display for ObjectTipe {
     }
 }
 
-impl FromStr for ObjectTipe {
+impl FromStr for ObjectType {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -139,7 +142,7 @@ fn write_file(path: &PathBuf, data: Vec<u8>) -> Result<(), std::io::Error> {
 pub fn init(repository: PathBuf) -> Result<(), std::io::Error> {
     fs::create_dir_all(&repository)?;
     fs::create_dir_all(&repository.join(".aggit"))?;
-    let git_folders: [&str; 3] = ["objects", "refs", "refs/heads"];
+    let git_folders: [&str; 4] = ["objects", "refs", "refs/heads", "refs/index"];
     for g in git_folders {
         fs::create_dir_all(&repository.join(".aggit").join(g))?;
     }
@@ -171,7 +174,7 @@ fn decompress(data: &mut Vec<u8>) -> anyhow::Result<Vec<u8>> {
 
 pub fn hash_object(
     data: &mut Vec<u8>,
-    object_type: ObjectTipe,
+    object_type: ObjectType,
     write: bool,
 ) -> anyhow::Result<String> {
     let mut full_data = format!("{} {:?}", &object_type, &data.len()).into_bytes();
@@ -233,7 +236,7 @@ pub fn find_object(sha1_prefix: &str) -> anyhow::Result<PathBuf> {
 
 /// Read object with given SHA-1 prefix and return tuple of
 /// (object_type, data_bytes), or raise ValueError if not found.
-pub fn read_object(sha1_prefix: &str) -> anyhow::Result<(ObjectTipe, Vec<u8>)> {
+pub fn read_object(sha1_prefix: &str) -> anyhow::Result<(ObjectType, Vec<u8>)> {
     let path = find_object(sha1_prefix)?;
     let full_data = decompress(&mut read_file(&path)?)?;
     let nul_index = full_data
@@ -250,7 +253,7 @@ pub fn read_object(sha1_prefix: &str) -> anyhow::Result<(ObjectTipe, Vec<u8>)> {
                 spliced.len()
             ));
         }
-        let object_type = ObjectTipe::from_str(spliced[0])?;
+        let object_type = ObjectType::from_str(spliced[0])?;
         let size = spliced[1].parse::<usize>()?;
         let data = &full_data[idx + 1..];
         if size != data.len() {
@@ -279,16 +282,26 @@ pub fn cat_file(mode: &str, sha1_prefix: &str) -> anyhow::Result<()> {
     let valid_mode = CatFileMode::from_str(mode)?;
     match valid_mode {
         CatFileMode::ObjType => {
-            if obj_data.0 != ObjectTipe::from_str(mode)? {
+            if obj_data.0 != ObjectType::from_str(mode)? {
                 return Err(anyhow!(
                     "Expected object type: {}, got {}",
                     obj_data.0,
                     mode
                 ));
             }
-            let mut str_data = String::new();
-            obj_data.1.as_slice().read_to_string(&mut str_data)?;
-            println!("{}", str_data);
+            match obj_data.0 {
+                ObjectType::Tree => {
+                    let entries = read_tree(None, Some(obj_data.1))?;
+                    for (mode, path, sha1) in entries {
+                        println!("{:06o} blob {}\t{}", mode, sha1, path);
+                    }
+                }
+                _ => {
+                    let mut str_data = String::new();
+                    obj_data.1.as_slice().read_to_string(&mut str_data)?;
+                    println!("{}", str_data);
+                }
+            }
         }
         CatFileMode::Size => {
             println!("{:?}", obj_data.1.len());
@@ -297,17 +310,17 @@ pub fn cat_file(mode: &str, sha1_prefix: &str) -> anyhow::Result<()> {
             println!("{}", obj_data.0);
         }
         CatFileMode::Pretty => match obj_data.0 {
-            ObjectTipe::Blob => {
+            ObjectType::Blob => {
                 let mut str_data = String::new();
                 obj_data.1.as_slice().read_to_string(&mut str_data)?;
                 println!("{}", str_data);
             }
-            ObjectTipe::Commit => {
+            ObjectType::Commit => {
                 let mut str_data = String::new();
                 obj_data.1.as_slice().read_to_string(&mut str_data)?;
                 println!("{}", str_data);
             }
-            ObjectTipe::Tree => {
+            ObjectType::Tree => {
                 let tree_objs = read_tree(None, Some(obj_data.1))?;
                 for (mode, path, sha1) in tree_objs {
                     let type_str = if (mode & 0o170000) == 0o040000 {
@@ -315,21 +328,25 @@ pub fn cat_file(mode: &str, sha1_prefix: &str) -> anyhow::Result<()> {
                     } else {
                         "blob"
                     };
-                    println!("{:#o} {} {}\t{}", mode, type_str, sha1, path);
+                    println!("{:o} {} {}\t{}", mode, type_str, sha1, path);
                 }
-            } // TODO: handle tree when read_tree function is ready
+            }
         },
     }
     Ok(())
 }
 
 /// Read git index file and return list of IndexEntry objects.
-// TODO: take into account current branch when writing to avoid cross-branch problems
 pub fn read_index() -> anyhow::Result<Vec<IndexEntry>> {
-    let data = match read_file(&PathBuf::from(".aggit/index")) {
+    let current_branch = get_current_branch()?;
+    let index_path = index_path_for_branch(&current_branch);
+    let data = match read_file(&index_path) {
         Ok(d) => d,
         Err(_) => return Ok(vec![]),
     };
+    if data.is_empty() {
+        return Ok(vec![]);
+    }
 
     // Validate SHA1 checksum
     let (body, checksum) = data.split_at(data.len() - 20);
@@ -418,7 +435,7 @@ pub fn ls_files(details: bool) -> anyhow::Result<()> {
         if details {
             let stage = (entry.flags >> 12) & 3;
             println!(
-                "{:#o}\t{}\t{:?}\t{}",
+                "{:o}\t{}\t{:?}\t{}",
                 entry.mode,
                 hex::encode(entry.sha1),
                 stage,
@@ -457,7 +474,7 @@ pub fn get_status() -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
         .into_iter()
         .filter(|p| {
             let mut data = read_file(&PathBuf::from(p)).unwrap();
-            let obj_hash = hash_object(&mut data, ObjectTipe::Blob, false).unwrap();
+            let obj_hash = hash_object(&mut data, ObjectType::Blob, false).unwrap();
             let entry = entries_by_path.get(*p).unwrap();
             obj_hash != hex::encode(entry.sha1)
         })
@@ -518,7 +535,7 @@ pub fn diff() -> anyhow::Result<()> {
         let sha1 = hex::encode(entries_by_path.get(&changed[i]).unwrap().sha1);
         let (obj_type, data) = read_object(&sha1)?;
         match obj_type {
-            ObjectTipe::Blob => {}
+            ObjectType::Blob => {}
             _ => return Err(anyhow!("Expected object type to be 'blob'")),
         }
         let mut full_str = String::new();
@@ -550,7 +567,6 @@ pub fn diff() -> anyhow::Result<()> {
 }
 
 /// Write list of IndexEntry objects to git index file.
-// TODO: take into account current branch when writing to avoid cross-branch problems
 pub fn write_index(entries: &[IndexEntry]) -> anyhow::Result<()> {
     let mut data: Vec<u8> = Vec::new();
 
@@ -585,8 +601,10 @@ pub fn write_index(entries: &[IndexEntry]) -> anyhow::Result<()> {
     // Append SHA1 digest of everything written so far
     let digest = Sha1::digest(&data);
     data.extend_from_slice(&digest);
+    let current_branch = get_current_branch()?;
+    let index_path = index_path_for_branch(&current_branch);
 
-    write_file(&std::path::PathBuf::from(".aggit/index"), data)?;
+    write_file(&index_path, data)?;
     Ok(())
 }
 
@@ -601,7 +619,7 @@ pub fn add(paths: Vec<String>) -> anyhow::Result<()> {
         .collect();
     for path in replaced {
         let mut data = read_file(&PathBuf::from(&path))?;
-        let sha1 = hash_object(&mut data, ObjectTipe::Blob, true)?;
+        let sha1 = hash_object(&mut data, ObjectType::Blob, true)?;
         let st = fs::metadata(&path)?;
         let flags = path.as_bytes().len() as u16;
         if !(flags < (1 << 12)) {
@@ -632,18 +650,24 @@ pub fn add(paths: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read tree object with given SHA-1 (hex string) or data, and return list
-/// of (mode, path, sha1) tuples.
 pub fn read_tree(
     sha1: Option<String>,
     data: Option<Vec<u8>>,
+) -> anyhow::Result<Vec<(u32, String, String)>> {
+    read_tree_recursive(sha1, data, "")
+}
+
+fn read_tree_recursive(
+    sha1: Option<String>,
+    data: Option<Vec<u8>>,
+    prefix: &str,
 ) -> anyhow::Result<Vec<(u32, String, String)>> {
     let actual_data;
     if let Some(sh) = sha1 {
         let (obj_type, data) = read_object(&sh)?;
         actual_data = data;
         match obj_type {
-            ObjectTipe::Tree => {}
+            ObjectType::Tree => {}
             _ => return Err(anyhow!("Expected object type to be 'tree'")),
         }
     } else if let Some(d) = data {
@@ -653,59 +677,98 @@ pub fn read_tree(
             "At least one between SHA1 and data should be non-null"
         ));
     }
+
     let mut i = 0;
     let mut entries = Vec::new();
-    while i < 1000 {
-        let end_v: Vec<usize> = actual_data
-            .iter()
-            .enumerate()
-            .filter(|(j, x)| *j >= i && **x == HASH_SEPARATOR.as_bytes()[0])
-            .map(|(i, _)| i)
-            .collect();
-        if !end_v.is_empty() {
-            let e = end_v[0];
-            let mut subset = &actual_data[i..e];
-            let mut sub_str = String::new();
-            subset.read_to_string(&mut sub_str)?;
-            let split: Vec<String> = sub_str
-                .split_ascii_whitespace()
-                .map(|s| s.to_owned())
-                .collect();
-            if split.len() != 2 {
-                return Err(anyhow!(
-                    "Expected string to be split in exactly two pieces (mode, path)"
-                ));
-            }
-            let mode = split[0].parse::<u32>()?;
-            let digest = &actual_data[e + 1..e + 21];
-            let sha1 = hex::encode(digest);
-            entries.push((mode, split[1].clone(), sha1));
-            i = e + 1 + 20;
-        } else {
-            // not find, break
+
+    while i < actual_data.len() {
+        // Find the null separator
+        let Some(null_pos) = actual_data[i..].iter().position(|&b| b == 0) else {
             break;
+        };
+        let null_pos = i + null_pos;
+
+        let header = std::str::from_utf8(&actual_data[i..null_pos])?;
+        let (mode_str, name) = header
+            .split_once(' ')
+            .ok_or(anyhow!("Invalid tree entry header"))?;
+
+        let mode = u32::from_str_radix(mode_str, 8)?; // mode is octal
+        let full_path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}{}", prefix, name)
+        };
+
+        let digest = &actual_data[null_pos + 1..null_pos + 21];
+        let sha1_hex = hex::encode(digest);
+
+        if mode == 0o40000 {
+            // It's a subtree: recurse with updated prefix
+            let mut sub_entries =
+                read_tree_recursive(Some(sha1_hex), None, &format!("{}/", full_path))?;
+            entries.append(&mut sub_entries);
+        } else {
+            entries.push((mode, full_path, sha1_hex));
         }
+
+        i = null_pos + 1 + 20;
     }
 
     Ok(entries)
 }
 
-/// Write a tree object from the current index entries.
 pub fn write_tree() -> anyhow::Result<String> {
-    let mut tree_entries = Vec::new();
     let entries = read_index()?;
+    write_tree_recursive(&entries, "")
+}
+
+fn write_tree_recursive(entries: &[IndexEntry], prefix: &str) -> anyhow::Result<String> {
+    let mut tree_entries: Vec<u8> = Vec::new();
+
+    // Collect direct children (files) and subdirectory groups
+    let mut subdirs: std::collections::BTreeMap<String, Vec<&IndexEntry>> = Default::default();
+    let mut files: Vec<&IndexEntry> = Vec::new();
+
     for entry in entries {
-        if entry.path.contains("/") {
-            return Err(anyhow!(
-                "Currently supports only a single, top-level directory"
-            ));
+        let relative = entry.path.strip_prefix(prefix).unwrap_or(&entry.path);
+        if let Some((dir, _)) = relative.split_once('/') {
+            subdirs.entry(dir.to_string()).or_default().push(entry);
+        } else {
+            files.push(entry);
         }
-        let mut tree_entry = format!("{:#o} {}", entry.mode, entry.path).into_bytes();
-        tree_entry.append(&mut HASH_SEPARATOR.to_string().into_bytes());
-        tree_entry.append(&mut entry.sha1.to_vec());
-        tree_entries.append(&mut tree_entry);
     }
-    hash_object(&mut tree_entries, ObjectTipe::Tree, true)
+
+    // Write file blobs directly
+    for entry in files {
+        let mut te = format!(
+            "{:o} {}",
+            entry.mode,
+            entry.path.strip_prefix(prefix).unwrap_or(&entry.path)
+        )
+        .into_bytes();
+        te.push(0); // null separator
+        te.extend_from_slice(&entry.sha1);
+        tree_entries.extend(te);
+    }
+
+    // Recursively write subtrees
+    for (dir, sub_entries) in &subdirs {
+        let new_prefix = if prefix.is_empty() {
+            format!("{}/", dir)
+        } else {
+            format!("{}{}/", prefix, dir)
+        };
+        let entr: Vec<IndexEntry> = sub_entries.iter().map(|i| (*i).clone()).collect();
+        let sub_sha1_hex = write_tree_recursive(entr.as_slice(), &new_prefix)?;
+        let sub_sha1 = hex::decode(sub_sha1_hex)?;
+        let mut te = format!("40000 {}", dir).into_bytes(); // dir mode, no leading 0
+        te.push(0);
+        te.extend_from_slice(&sub_sha1);
+        tree_entries.extend(te);
+    }
+
+    hash_object(&mut tree_entries, ObjectType::Tree, true)
 }
 
 /// Get current commit hash (SHA-1 string) of local main branch.
@@ -785,7 +848,7 @@ pub fn commit(message: &str) -> anyhow::Result<String> {
     lines.push(message.to_string());
     lines.push(String::new());
     let mut data = lines.join("\n").into_bytes();
-    let sha1 = hash_object(&mut data, ObjectTipe::Commit, true)?;
+    let sha1 = hash_object(&mut data, ObjectType::Commit, true)?;
     let main_path = PathBuf::from(".aggit")
         .join("refs")
         .join("heads")
@@ -805,6 +868,10 @@ fn get_current_branch() -> anyhow::Result<String> {
     Ok(branch.to_string())
 }
 
+fn index_path_for_branch(branch: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(".aggit/refs/index/{}", branch))
+}
+
 /// Switch to a different branch. If `create` is true and the target branch does
 /// not exist, create it from the current branch and commit.
 pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
@@ -813,6 +880,13 @@ pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
     if name == branch {
         println!("Already on branch {}", branch);
         return Ok(());
+    }
+    // check if branch is dirty (uncommitted changes)
+    let (changed, new, deleted) = get_status()?;
+    if !changed.is_empty() || !new.is_empty() || !deleted.is_empty() {
+        return Err(anyhow!(
+            "Current working tree has uncommitted changes. Please commit them and re-try"
+        ));
     }
     let branch_path = PathBuf::from(".aggit")
         .join("refs")
@@ -829,12 +903,25 @@ pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
             name
         ));
     } else if branch_path.exists() && !create {
+        // restore working tree
+        restore_working_tree(name)?;
         // set branch as current
         fs::write(&head_path, format!("ref: refs/heads/{}", name))?;
         println!("Switched to branch {}", name);
     } else {
         // create directory
         fs::create_dir_all(branch_path.parent().unwrap())?;
+        // Copy current branch's index to the new branch
+        let current_index_path = index_path_for_branch(&branch);
+        let new_index_path = index_path_for_branch(name);
+        if let Some(parent) = new_index_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if current_index_path.exists() {
+            fs::copy(&current_index_path, &new_index_path)?;
+        } else {
+            fs::write(&new_index_path, "")?;
+        }
         // get current hash
         let (current_hash, _) = get_local_current_hash()?;
         if let Some(hash) = current_hash {
@@ -853,5 +940,71 @@ pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
         fs::write(&head_path, format!("ref: refs/heads/{}", name))?;
     }
 
+    Ok(())
+}
+
+fn restore_working_tree(branch_name: &str) -> anyhow::Result<()> {
+    let branch_path = PathBuf::from(".aggit/refs/heads").join(branch_name);
+    let commit_hash = fs::read_to_string(&branch_path)?.trim().to_string();
+
+    if commit_hash.is_empty() {
+        // Branch has no commits yet, nothing to restore
+        return Ok(());
+    }
+
+    // Read the commit object to get the tree SHA1
+    let (obj_type, commit_data) = read_object(&commit_hash)?;
+    if !matches!(obj_type, ObjectType::Commit) {
+        return Err(anyhow!("Expected commit object"));
+    }
+
+    // Parse "tree <sha1>" from the first line of the commit
+    let commit_str = String::from_utf8(commit_data)?;
+    let tree_sha1 = commit_str
+        .lines()
+        .find(|l| l.starts_with("tree "))
+        .ok_or(anyhow!("No tree in commit"))?
+        .strip_prefix("tree ")
+        .unwrap()
+        .to_string();
+
+    // Read the tree to get file entries
+    let tree_entries = read_tree(Some(tree_sha1), None)?;
+
+    // Restore each file in the working tree
+    for (mode, path, sha1) in &tree_entries {
+        let (_, file_data) = read_object(sha1)?;
+        fs::write(path, &file_data)?;
+        fs::set_permissions(path, Permissions::from_mode(*mode))?;
+    }
+
+    // Rebuild the index from the tree entries to match
+    let index_entries: Vec<IndexEntry> = tree_entries
+        .iter()
+        .map(|(mode, path, sha1)| {
+            let flags = path.as_bytes().len() as u16;
+            if !(flags < (1 << 12)) {
+                return Err(anyhow!("Invalid flags"));
+            }
+            let meta = fs::metadata(path)?; // stat the just-written file
+            Ok(IndexEntry {
+                mode: *mode,
+                path: path.clone(),
+                sha1: hex::decode(sha1)?.try_into().unwrap(),
+                ctime_s: meta.ctime() as u32,
+                ctime_n: meta.ctime_nsec() as u32,
+                mtime_s: meta.mtime() as u32,
+                mtime_n: meta.mtime_nsec() as u32,
+                size: meta.size() as u32,
+                ino: meta.ino() as u32,
+                dev: meta.dev() as u32,
+                uid: meta.uid(),
+                gid: meta.gid(),
+                flags,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    write_index(&index_entries)?;
     Ok(())
 }
