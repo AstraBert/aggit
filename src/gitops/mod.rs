@@ -858,7 +858,7 @@ pub fn commit(message: &str) -> anyhow::Result<String> {
     Ok(sha1)
 }
 
-fn get_current_branch() -> anyhow::Result<String> {
+pub fn get_current_branch() -> anyhow::Result<String> {
     let head_path = PathBuf::from(".aggit").join("HEAD");
     let current_ref = fs::read_to_string(&head_path)?;
     let branch = current_ref
@@ -1023,4 +1023,46 @@ fn restore_working_tree(branch_name: &str) -> anyhow::Result<()> {
 
     write_index(&index_entries)?;
     Ok(())
+}
+
+/// Collect all reachable objects between the current local head (included) and the remote head (excluded)
+pub fn collect_reachable_objects(
+    head_sha1: &str,
+    remote_head: Option<&str>,
+) -> anyhow::Result<HashSet<String>> {
+    let mut visited = HashSet::new();
+    let mut queue = vec![head_sha1.to_string()];
+
+    while let Some(sha1) = queue.pop() {
+        // Stop if we've reached the commit the remote already has
+        if remote_head == Some(sha1.as_str()) {
+            continue;
+        }
+        // Already visited, skip
+        if !visited.insert(sha1.clone()) {
+            continue;
+        }
+        let (obj_type, data) = read_object(&sha1)?;
+        match obj_type {
+            ObjectType::Commit => {
+                let text = String::from_utf8(data)?;
+                for line in text.lines() {
+                    if let Some(s) = line.strip_prefix("tree ") {
+                        queue.push(s.to_string());
+                    }
+                    if let Some(s) = line.strip_prefix("parent ") {
+                        queue.push(s.to_string());
+                    }
+                }
+            }
+            ObjectType::Tree => {
+                let entries = read_tree(None, Some(data))?;
+                for (_, _, sha1) in entries {
+                    queue.push(sha1);
+                }
+            }
+            ObjectType::Blob => {}
+        }
+    }
+    Ok(visited)
 }

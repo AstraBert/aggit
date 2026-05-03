@@ -1,13 +1,18 @@
 mod gitops;
+mod repository;
 mod s3ops;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::gitops::{
-    add, cat_file, commit, config_author, diff, init, list_branches, ls_files, status,
-    switch_branch,
+use crate::{
+    gitops::{
+        add, cat_file, commit, config_author, diff, init, list_branches, ls_files, status,
+        switch_branch,
+    },
+    repository::config_repository,
+    s3ops::manage_origin,
 };
 
 #[derive(Parser)]
@@ -94,6 +99,45 @@ enum Commands {
 
     /// View current branch an all active local branches
     Branch {},
+
+    /// Create, add and update S3 origins.
+    ///
+    /// An S3 endpoint and valid secret key and key ID are required.
+    ///
+    /// Write to `.aggitignore` (containing the origin details)
+    Origin {
+        /// The operation to execute. Allowed values: 'create' (create the first origin),
+        /// 'add' (add an origin to existing ones), 'update' (update an origin among existing ones)
+        action: String,
+        /// Name of the origin
+        name: String,
+        /// Secret access key for the S3 deployment. Must have write permissions.
+        #[arg(long, short, default_value = None)]
+        secret_key: Option<String>,
+        /// ID of the secret access key.
+        #[arg(long, short, default_value = None)]
+        key_id: Option<String>,
+        /// S3 deployment endpoint.
+        #[arg(long, short, default_value = None)]
+        endpoint: Option<String>,
+        /// S3 deployment region.
+        #[arg(long, short, default_value = None)]
+        region: Option<String>,
+    },
+
+    /// Configure the aggit repository.
+    ///
+    /// Creates a `.aggit/repo.toml` file with the repository details.
+    Repo {
+        /// Name of the repository.
+        name: String,
+        /// Description of the repository
+        #[arg(short, long, default_value = None)]
+        description: Option<String>,
+        /// Topics of the repository. Can be used multiple times.
+        #[arg(short, long, default_value = None)]
+        topic: Option<Vec<String>>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -128,6 +172,27 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Branch {} => {
             list_branches()?;
+        }
+        Commands::Origin {
+            action,
+            name,
+            secret_key,
+            key_id,
+            endpoint,
+            region,
+        } => {
+            manage_origin(&action, &name, endpoint, secret_key, key_id, region)?;
+        }
+        Commands::Repo {
+            name,
+            description,
+            topic,
+        } => {
+            config_repository(
+                name,
+                description.unwrap_or_default(),
+                topic.unwrap_or(vec![]),
+            )?;
         }
     }
 

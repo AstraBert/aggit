@@ -1,20 +1,50 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{collections::HashMap, fs, io::Read, path::PathBuf, str::FromStr, sync::Arc};
 
 use anyhow::anyhow;
+use aws_config::{BehaviorVersion, Region};
+use aws_sdk_s3::{
+    Client, config::Credentials, operation::get_object::GetObjectError, primitives::ByteStream,
+};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
-struct S3Origin {
-    endpoint: String,
-    secret_key: String,
-    key_id: String,
-}
+use crate::{
+    gitops::{get_current_branch, get_local_current_hash},
+    repository::get_repository,
+};
 
 const ORIGIN_FILE: &str = ".aggitorigin";
 const GITIGNORE: &str = ".gitignore";
 const AGGITIGNORE: &str = ".aggitignore";
 
-pub fn add_origin_to_gitignore() -> anyhow::Result<()> {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct S3Origin {
+    endpoint: String,
+    secret_key: String,
+    key_id: String,
+    region: String,
+}
+
+#[derive(Debug)]
+enum OriginAction {
+    Create,
+    Update,
+    Add,
+}
+
+impl FromStr for OriginAction {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "add" => Ok(Self::Add),
+            "create" => Ok(Self::Create),
+            "update" => Ok(Self::Update),
+            _ => anyhow::bail!("unknown action: {}", s),
+        }
+    }
+}
+
+fn add_origin_to_gitignore() -> anyhow::Result<()> {
     let mut gitignore = fs::read_to_string(GITIGNORE)?;
     let mut aggitignore = fs::read_to_string(AGGITIGNORE)?;
     if !gitignore.contains(ORIGIN_FILE) {
@@ -28,16 +58,18 @@ pub fn add_origin_to_gitignore() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn create_origin(
+fn create_origin(
     name: &str,
     endpoint: String,
     secret_key: String,
     key_id: String,
+    region: String,
 ) -> anyhow::Result<()> {
     let origin = S3Origin {
         endpoint,
         secret_key,
         key_id,
+        region,
     };
     let mut origins = HashMap::new();
     origins.insert(name, origin);
@@ -54,10 +86,230 @@ pub fn create_origin(
     Ok(())
 }
 
-pub fn update_config(
+fn update_origin(
     name: &str,
     endpoint: Option<String>,
     secret_key: Option<String>,
     key_id: Option<String>,
-) {
+    region: Option<String>,
+) -> anyhow::Result<()> {
+    let origin_path = PathBuf::from(ORIGIN_FILE);
+    if !origin_path.exists() {
+        return Err(anyhow!(
+            "{} does not exist, use the `create` action to add your first origin",
+            ORIGIN_FILE
+        ));
+    }
+    let content = fs::read_to_string(&origin_path)?;
+    let mut validated: HashMap<String, S3Origin> = toml::from_str(&content)?;
+    if !validated.contains_key(name) {
+        return Err(anyhow!("Origin {} does not exist", name));
+    }
+    validated.entry(name.to_owned()).and_modify(|v| {
+        if let Some(e) = endpoint {
+            v.endpoint = e;
+        }
+        if let Some(sk) = secret_key {
+            v.secret_key = sk;
+        }
+        if let Some(ki) = key_id {
+            v.key_id = ki;
+        }
+        if let Some(r) = region {
+            v.region = r;
+        }
+    });
+    let updated = toml::to_string(&validated)?;
+    fs::write(&origin_path, updated)?;
+
+    Ok(())
+}
+
+pub fn add_origin(
+    name: &str,
+    endpoint: String,
+    secret_key: String,
+    key_id: String,
+    region: String,
+) -> anyhow::Result<()> {
+    let origin_path = PathBuf::from(ORIGIN_FILE);
+    if !origin_path.exists() {
+        return Err(anyhow!(
+            "{} does not exist, use the `create` action to add your first origin",
+            ORIGIN_FILE
+        ));
+    }
+    let content = fs::read_to_string(&origin_path)?;
+    let mut validated: HashMap<String, S3Origin> = toml::from_str(&content)?;
+    if validated.contains_key(name) {
+        return Err(anyhow!(
+            "Origin {} already exists, use the `update` action to update it",
+            name
+        ));
+    }
+    validated.insert(
+        name.to_string(),
+        S3Origin {
+            endpoint,
+            secret_key,
+            key_id,
+            region,
+        },
+    );
+    let added = toml::to_string(&validated)?;
+    fs::write(&origin_path, added)?;
+
+    Ok(())
+}
+
+pub fn manage_origin(
+    action: &str,
+    name: &str,
+    endpoint: Option<String>,
+    secret_key: Option<String>,
+    key_id: Option<String>,
+    region: Option<String>,
+) -> anyhow::Result<()> {
+    let validated_action = OriginAction::from_str(action)?;
+    match validated_action {
+        OriginAction::Create => {
+            if vec![&endpoint, &secret_key, &key_id, &region]
+                .iter()
+                .any(|x| x.is_none())
+            {
+                return Err(anyhow!(
+                    "Endpoint, secret key and key ID are all required to create an S3 origin"
+                ));
+            }
+            create_origin(
+                name,
+                endpoint.unwrap(),
+                secret_key.unwrap(),
+                key_id.unwrap(),
+                region.unwrap(),
+            )?;
+            println!("Successfully created origin {} at {}", name, ORIGIN_FILE);
+        }
+        OriginAction::Update => {
+            update_origin(name, endpoint, secret_key, key_id, region)?;
+            println!("Successfully updated origin {} in {}", name, ORIGIN_FILE);
+        }
+        OriginAction::Add => {
+            if vec![&endpoint, &secret_key, &key_id, &region]
+                .iter()
+                .any(|x| x.is_none())
+            {
+                return Err(anyhow!(
+                    "Endpoint, secret key and key ID are all required to add an S3 origin to existing origins"
+                ));
+            }
+            add_origin(
+                name,
+                endpoint.unwrap(),
+                secret_key.unwrap(),
+                key_id.unwrap(),
+                region.unwrap(),
+            )?;
+            println!(
+                "Successfully added origin {} to existing origins in {}",
+                name, ORIGIN_FILE
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn get_origin(origin: &str) -> anyhow::Result<S3Origin> {
+    let content = fs::read_to_string(ORIGIN_FILE)?;
+    let validated: HashMap<String, S3Origin> = toml::from_str(&content)?;
+    if !validated.contains_key(origin) {
+        return Err(anyhow!("No such origin: {}", origin));
+    }
+    let ori = validated.get(origin).unwrap();
+    Ok(ori.clone())
+}
+
+async fn get_client(ori: S3Origin) -> Arc<Client> {
+    let credentials = Credentials::new(ori.key_id, ori.secret_key, None, None, "s3");
+    let region = Region::new(ori.region);
+    let shard_config = aws_config::defaults(BehaviorVersion::latest())
+        .region(region)
+        .credentials_provider(credentials)
+        .endpoint_url(ori.endpoint)
+        .load()
+        .await;
+    let client = Client::new(&shard_config);
+
+    Arc::new(client)
+}
+
+async fn check_or_create_bucket(origin: &str, client: Arc<Client>) -> anyhow::Result<String> {
+    let repository = get_repository()?;
+    let main_branch = get_current_branch()?;
+    // check if origin exists
+    let _ = get_origin(origin)?;
+    let bucket_name = format!("{}-{}-{}", origin, repository.name, main_branch);
+    let buckets_list = client
+        .list_buckets()
+        .prefix(&bucket_name)
+        .max_buckets(1)
+        .send()
+        .await?;
+    let buckets = buckets_list.buckets();
+    if buckets.is_empty() {
+        println!(
+            "↻ Bucket for origin {}, repository {} and branch {} does not exist, creating it...",
+            origin, repository.name, main_branch
+        );
+        client.create_bucket().bucket(&bucket_name).send().await?;
+        println!("✔ Bucket successfully created");
+    }
+    println!(
+        "✔ Bucket for origin {}, repository {} and branch {} exists",
+        origin, repository.name, main_branch
+    );
+
+    return Ok(bucket_name);
+}
+
+async fn get_remote_head(bucket_name: &str, client: Arc<Client>) -> anyhow::Result<Option<String>> {
+    let result = client
+        .get_object()
+        .bucket(bucket_name)
+        .key("head")
+        .send()
+        .await;
+    match result {
+        Ok(o) => {
+            let bts = o.body.bytes();
+            if bts.is_none() {
+                return Err(anyhow!("No bytes in the remote head"));
+            }
+            let mut chars = bts.unwrap();
+            let mut head = String::new();
+            chars.read_to_string(&mut head)?;
+            Ok(Some(head))
+        }
+        Err(e) => {
+            let service_err = e.into_service_error();
+            match service_err {
+                GetObjectError::NoSuchKey(_) => {
+                    let (current_head, _) = get_local_current_hash()?;
+                    if current_head.is_none() {
+                        return Err(anyhow!("No current head, nothing to push"));
+                    }
+                    client
+                        .put_object()
+                        .bucket(bucket_name)
+                        .key("head")
+                        .body(ByteStream::from(current_head.clone().unwrap().into_bytes()))
+                        .send()
+                        .await?;
+                    Ok(None)
+                }
+                _ => Err(anyhow!(service_err.to_string())),
+            }
+        }
+    }
 }
