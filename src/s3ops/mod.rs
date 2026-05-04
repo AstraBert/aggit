@@ -1,20 +1,32 @@
-use std::{collections::HashMap, fs, io::Read, path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    io::Read,
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+};
 
 use anyhow::anyhow;
-use aws_config::{BehaviorVersion, Region};
+use aws_config::{BehaviorVersion, Region, retry::RetryConfig};
 use aws_sdk_s3::{
     Client, config::Credentials, operation::get_object::GetObjectError, primitives::ByteStream,
 };
 use serde::{Deserialize, Serialize};
+use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{
-    gitops::{get_current_branch, get_local_current_hash},
+    gitops::{
+        collect_reachable_objects, find_object, get_current_branch, get_local_current_hash,
+        read_object,
+    },
     repository::get_repository,
 };
 
 const ORIGIN_FILE: &str = ".aggitorigin";
 const GITIGNORE: &str = ".gitignore";
 const AGGITIGNORE: &str = ".aggitignore";
+const MAX_CONCURRENT_UPLOADS: usize = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct S3Origin {
@@ -237,6 +249,7 @@ async fn get_client(ori: S3Origin) -> Arc<Client> {
         .region(region)
         .credentials_provider(credentials)
         .endpoint_url(ori.endpoint)
+        .retry_config(RetryConfig::standard())
         .load()
         .await;
     let client = Client::new(&shard_config);
@@ -244,7 +257,7 @@ async fn get_client(ori: S3Origin) -> Arc<Client> {
     Arc::new(client)
 }
 
-async fn check_or_create_bucket(origin: &str, client: Arc<Client>) -> anyhow::Result<String> {
+async fn check_or_create_bucket(origin: &str, client: &Arc<Client>) -> anyhow::Result<String> {
     let repository = get_repository()?;
     let main_branch = get_current_branch()?;
     // check if origin exists
@@ -273,7 +286,10 @@ async fn check_or_create_bucket(origin: &str, client: Arc<Client>) -> anyhow::Re
     return Ok(bucket_name);
 }
 
-async fn get_remote_head(bucket_name: &str, client: Arc<Client>) -> anyhow::Result<Option<String>> {
+async fn get_remote_head(
+    bucket_name: &str,
+    client: &Arc<Client>,
+) -> anyhow::Result<Option<String>> {
     let result = client
         .get_object()
         .bucket(bucket_name)
@@ -294,22 +310,92 @@ async fn get_remote_head(bucket_name: &str, client: Arc<Client>) -> anyhow::Resu
         Err(e) => {
             let service_err = e.into_service_error();
             match service_err {
-                GetObjectError::NoSuchKey(_) => {
-                    let (current_head, _) = get_local_current_hash()?;
-                    if current_head.is_none() {
-                        return Err(anyhow!("No current head, nothing to push"));
-                    }
-                    client
-                        .put_object()
-                        .bucket(bucket_name)
-                        .key("head")
-                        .body(ByteStream::from(current_head.clone().unwrap().into_bytes()))
-                        .send()
-                        .await?;
-                    Ok(None)
-                }
+                GetObjectError::NoSuchKey(_) => Ok(None),
                 _ => Err(anyhow!(service_err.to_string())),
             }
         }
     }
+}
+
+async fn create_object(
+    key: &str,
+    content: Vec<u8>,
+    bucket_name: &str,
+    client: Arc<Client>,
+) -> anyhow::Result<()> {
+    client
+        .put_object()
+        .bucket(bucket_name)
+        .key(key)
+        .body(ByteStream::from(content))
+        .send()
+        .await?;
+    Ok(())
+}
+
+async fn upload_objects_and_head(
+    remote_head: Option<&str>,
+    bucket_name: String,
+    client: Arc<Client>,
+) -> anyhow::Result<(i32, i32, i32)> {
+    let (current_head, _) = get_local_current_hash()?;
+    if current_head.is_none() {
+        return Err(anyhow!("No current head, nothing to push"));
+    }
+    let objects = collect_reachable_objects(&current_head.clone().unwrap(), remote_head)?;
+    let mut object_content = HashMap::new();
+    for obj in objects {
+        let path = find_object(&obj)?;
+        let (_, content) = read_object(&obj)?;
+        object_content.insert(path.to_string_lossy().to_string(), content);
+    }
+    object_content.insert("head".to_string(), current_head.unwrap().into_bytes());
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
+    let mut join_set = JoinSet::new();
+    for (k, v) in object_content {
+        let permit = semaphore.clone().acquire_owned().await?;
+        let client = client.clone();
+        let bucket_name = bucket_name.clone();
+        join_set.spawn(async move {
+            let _permit = permit;
+            create_object(&k, v, &bucket_name, client).await
+        });
+    }
+
+    let mut failed = 0;
+    let mut panicked = 0;
+    let mut success = 0;
+
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(())) => {
+                success += 1;
+            }
+            Ok(Err(e)) => {
+                eprintln!("Error while uploading the object: {e}");
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("Error while executing object upload function: {e}");
+                panicked += 1;
+            } // JoinError
+        }
+    }
+
+    Ok((success, failed, panicked))
+}
+
+pub async fn push(origin: String) -> anyhow::Result<()> {
+    let ori = get_origin(&origin)?;
+    let client = get_client(ori).await;
+    let bucket_name = check_or_create_bucket(&origin, &client).await?;
+    let remote_head = get_remote_head(&bucket_name, &client).await?;
+    let (success, failed, panicked) =
+        upload_objects_and_head(remote_head.as_deref(), bucket_name, client).await?;
+    println!(
+        "Successfully pushed {:?} objects, failed to push {:?} and {:?} panicked",
+        success, failed, panicked
+    );
+
+    Ok(())
 }
