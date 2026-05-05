@@ -884,7 +884,7 @@ pub fn list_branches() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn index_path_for_branch(branch: &str) -> std::path::PathBuf {
+pub fn index_path_for_branch(branch: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(".aggit/refs/index/{}", branch))
 }
 

@@ -1,11 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    io::Read,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashMap, fs, io::Read, path::PathBuf, str::FromStr, sync::Arc};
 
 use anyhow::anyhow;
 use aws_config::{BehaviorVersion, Region, retry::RetryConfig};
@@ -18,7 +11,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{
     gitops::{
         collect_reachable_objects, find_object, get_current_branch, get_local_current_hash,
-        read_object,
+        index_path_for_branch, read_object,
     },
     repository::get_repository,
 };
@@ -298,12 +291,9 @@ async fn get_remote_head(
         .await;
     match result {
         Ok(o) => {
-            let bts = o.body.bytes();
-            if bts.is_none() {
-                return Err(anyhow!("No bytes in the remote head"));
-            }
-            let mut chars = bts.unwrap();
+            let bts = o.body.collect().await?.into_bytes();
             let mut head = String::new();
+            let mut chars = bts.iter().as_slice();
             chars.read_to_string(&mut head)?;
             Ok(Some(head))
         }
@@ -333,23 +323,32 @@ async fn create_object(
     Ok(())
 }
 
+fn trim_path(path: &PathBuf) -> anyhow::Result<String> {
+    let path_str = path.to_str().ok_or(anyhow!("Non-UTF8 path"))?;
+    path_str
+        .split_once(".aggit/")
+        .map(|(_, after)| after.to_owned())
+        .ok_or(anyhow!("Path does not contain .aggit/: {}", path_str))
+}
+
 async fn upload_objects_and_head(
     remote_head: Option<&str>,
     bucket_name: String,
     client: Arc<Client>,
-) -> anyhow::Result<(i32, i32, i32)> {
+) -> anyhow::Result<i32> {
     let (current_head, _) = get_local_current_hash()?;
-    if current_head.is_none() {
-        return Err(anyhow!("No current head, nothing to push"));
-    }
-    let objects = collect_reachable_objects(&current_head.clone().unwrap(), remote_head)?;
+    let current_head = current_head.ok_or(anyhow!("No current head, nothing to push"))?;
+    let objects = collect_reachable_objects(&current_head, remote_head)?;
     let mut object_content = HashMap::new();
     for obj in objects {
         let path = find_object(&obj)?;
         let (_, content) = read_object(&obj)?;
-        object_content.insert(path.to_string_lossy().to_string(), content);
+        object_content.insert(trim_path(&path)?, content);
     }
-    object_content.insert("head".to_string(), current_head.unwrap().into_bytes());
+    object_content.insert("head".to_string(), current_head.into_bytes());
+    let index_path = index_path_for_branch(&get_current_branch()?);
+    let index_content = fs::read(&index_path)?;
+    object_content.insert(trim_path(&index_path)?, index_content);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
     let mut join_set = JoinSet::new();
     for (k, v) in object_content {
@@ -382,7 +381,11 @@ async fn upload_objects_and_head(
         }
     }
 
-    Ok((success, failed, panicked))
+    if failed > 0 || panicked > 0 {
+        return Err(anyhow!("{} uploads failed, {} panicked", failed, panicked));
+    }
+
+    Ok(success)
 }
 
 pub async fn push(origin: String) -> anyhow::Result<()> {
@@ -390,12 +393,8 @@ pub async fn push(origin: String) -> anyhow::Result<()> {
     let client = get_client(ori).await;
     let bucket_name = check_or_create_bucket(&origin, &client).await?;
     let remote_head = get_remote_head(&bucket_name, &client).await?;
-    let (success, failed, panicked) =
-        upload_objects_and_head(remote_head.as_deref(), bucket_name, client).await?;
-    println!(
-        "Successfully pushed {:?} objects, failed to push {:?} and {:?} panicked",
-        success, failed, panicked
-    );
+    let success = upload_objects_and_head(remote_head.as_deref(), bucket_name, client).await?;
+    println!("Successfully pushed {:?} objects", success);
 
     Ok(())
 }

@@ -12,7 +12,7 @@ use crate::{
         switch_branch,
     },
     repository::config_repository,
-    s3ops::manage_origin,
+    s3ops::{manage_origin, push},
 };
 
 #[derive(Parser)]
@@ -138,9 +138,17 @@ enum Commands {
         #[arg(short, long, default_value = None)]
         topic: Option<Vec<String>>,
     },
+
+    /// Push recent commits to the remote S3 bucket configured
+    /// for the current repository.
+    Push {
+        /// S3 origin to push to
+        origin: String,
+    },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
     match args.cmd {
         Commands::Init { path } => {
@@ -193,6 +201,9 @@ fn main() -> anyhow::Result<()> {
                 description.unwrap_or_default(),
                 topic.unwrap_or(vec![]),
             )?;
+        }
+        Commands::Push { origin } => {
+            push(origin).await?;
         }
     }
 
