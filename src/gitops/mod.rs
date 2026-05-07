@@ -959,7 +959,7 @@ pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn restore_working_tree(branch_name: &str) -> anyhow::Result<()> {
+pub fn restore_working_tree(branch_name: &str) -> anyhow::Result<()> {
     let branch_path = PathBuf::from(".aggit/refs/heads").join(branch_name);
     let commit_hash = fs::read_to_string(&branch_path)?.trim().to_string();
 

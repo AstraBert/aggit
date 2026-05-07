@@ -12,7 +12,7 @@ use crate::{
         switch_branch,
     },
     repository::config_repository,
-    s3ops::{manage_origin, push},
+    s3ops::{clone, manage_origin, push},
 };
 
 #[derive(Parser)]
@@ -145,6 +145,20 @@ enum Commands {
         /// S3 origin to push to
         origin: String,
     },
+
+    /// Clone the content of a remote repository
+    /// from a S3 origin
+    Clone {
+        /// S3 origin to clone from
+        #[arg(short, long)]
+        origin: String,
+        /// Repository name
+        #[arg(short, long)]
+        name: String,
+        /// Branch (defaults to main)
+        #[arg(short, long, default_value = None)]
+        branch: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -204,6 +218,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Push { origin } => {
             push(origin).await?;
+        }
+        Commands::Clone {
+            origin,
+            name,
+            branch,
+        } => {
+            clone(origin, name, branch).await?;
         }
     }
 

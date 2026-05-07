@@ -11,7 +11,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{
     gitops::{
         collect_reachable_objects, find_object, get_current_branch, get_local_current_hash,
-        index_path_for_branch, read_object,
+        index_path_for_branch, read_object, restore_working_tree,
     },
     repository::get_repository,
 };
@@ -323,6 +323,29 @@ async fn create_object(
     Ok(())
 }
 
+async fn download_object(
+    bucket_name: &str,
+    key: &str,
+    client: Arc<Client>,
+) -> anyhow::Result<(String, Vec<u8>)> {
+    let resp = client
+        .get_object()
+        .bucket(bucket_name)
+        .key(key)
+        .send()
+        .await?;
+    let content = resp
+        .body
+        .collect()
+        .await?
+        .into_bytes()
+        .iter()
+        .as_slice()
+        .to_vec();
+
+    Ok((format!(".aggit/{}", key), content))
+}
+
 fn trim_path(path: &PathBuf) -> anyhow::Result<String> {
     let path_str = path.to_str().ok_or(anyhow!("Non-UTF8 path"))?;
     path_str
@@ -395,6 +418,63 @@ pub async fn push(origin: String) -> anyhow::Result<()> {
     let remote_head = get_remote_head(&bucket_name, &client).await?;
     let success = upload_objects_and_head(remote_head.as_deref(), bucket_name, client).await?;
     println!("Successfully pushed {:?} objects", success);
+
+    Ok(())
+}
+
+pub async fn clone(
+    origin: String,
+    repository_name: String,
+    branch: Option<String>,
+) -> anyhow::Result<()> {
+    let branch = branch.unwrap_or("main".to_string());
+    let ori = get_origin(&origin)?;
+    let client = get_client(ori).await;
+    let bucket_name = format!("{}-{}-{}", origin, repository_name, branch);
+    let all_objects = client.list_objects().bucket(&bucket_name).send().await?;
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
+    let mut join_set: JoinSet<Result<(), anyhow::Error>> = JoinSet::new();
+    if let Some(objs) = all_objects.contents {
+        for o in objs {
+            if let Some(key) = o.key {
+                let permit = semaphore.clone().acquire_owned().await?;
+                let client = client.clone();
+                let bucket_name = bucket_name.clone();
+                join_set.spawn(async move {
+                    let _permit = permit;
+                    let (path, contents) = download_object(&bucket_name, &key, client).await?;
+                    fs::write(path, contents).map_err(|e| anyhow!(e.to_string()))
+                });
+            }
+        }
+    }
+
+    let mut failed = 0;
+    let mut panicked = 0;
+
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("Error while uploading the object: {e}");
+                failed += 1;
+            }
+            Err(e) => {
+                eprintln!("Error while executing object upload function: {e}");
+                panicked += 1;
+            } // JoinError
+        }
+    }
+
+    if failed > 0 || panicked > 0 {
+        return Err(anyhow!("{} uploads failed, {} panicked", failed, panicked));
+    }
+
+    println!("Successfully written the .aggit/ directory");
+
+    restore_working_tree(&branch)?;
+
+    println!("Successfully cloned {} from {}", repository_name, origin);
 
     Ok(())
 }
