@@ -704,6 +704,7 @@ fn read_tree_recursive(
         let sha1_hex = hex::encode(digest);
 
         if mode == 0o40000 {
+            entries.push((mode, full_path.clone(), sha1_hex.clone()));
             // It's a subtree: recurse with updated prefix
             let mut sub_entries =
                 read_tree_recursive(Some(sha1_hex), None, &format!("{}/", full_path))?;
