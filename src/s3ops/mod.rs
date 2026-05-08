@@ -3,7 +3,11 @@ use std::{collections::HashMap, fs, io::Read, path::PathBuf, str::FromStr, sync:
 use anyhow::anyhow;
 use aws_config::{BehaviorVersion, Region, retry::RetryConfig};
 use aws_sdk_s3::{
-    Client, config::Credentials, operation::get_object::GetObjectError, primitives::ByteStream,
+    Client,
+    config::{Builder, Credentials},
+    operation::get_object::GetObjectError,
+    primitives::ByteStream,
+    types::{BucketLocationConstraint, CreateBucketConfiguration},
 };
 use serde::{Deserialize, Serialize};
 use tokio::{sync::Semaphore, task::JoinSet};
@@ -11,7 +15,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{
     gitops::{
         collect_reachable_objects, find_object, get_current_branch, get_local_current_hash,
-        index_path_for_branch, read_object, restore_working_tree,
+        head_path_for_branch, index_path_for_branch, read_object, restore_working_tree,
     },
     repository::get_repository,
 };
@@ -245,7 +249,8 @@ async fn get_client(ori: S3Origin) -> Arc<Client> {
         .retry_config(RetryConfig::standard())
         .load()
         .await;
-    let client = Client::new(&shard_config);
+    let s3_config = Builder::from(&shard_config).force_path_style(true).build();
+    let client = Client::from_conf(s3_config);
 
     Arc::new(client)
 }
@@ -254,7 +259,7 @@ async fn check_or_create_bucket(origin: &str, client: &Arc<Client>) -> anyhow::R
     let repository = get_repository()?;
     let main_branch = get_current_branch()?;
     // check if origin exists
-    let _ = get_origin(origin)?;
+    let ori = get_origin(origin)?;
     let bucket_name = format!("{}-{}-{}", origin, repository.name, main_branch);
     let buckets_list = client
         .list_buckets()
@@ -268,7 +273,20 @@ async fn check_or_create_bucket(origin: &str, client: &Arc<Client>) -> anyhow::R
             "↻ Bucket for origin {}, repository {} and branch {} does not exist, creating it...",
             origin, repository.name, main_branch
         );
-        client.create_bucket().bucket(&bucket_name).send().await?;
+        if ori.region == "us-east-1" {
+            client.create_bucket().bucket(&bucket_name).send().await?;
+        } else {
+            let constraint = BucketLocationConstraint::from(ori.region.as_str());
+            let cfg = CreateBucketConfiguration::builder()
+                .location_constraint(constraint)
+                .build();
+            client
+                .create_bucket()
+                .bucket(&bucket_name)
+                .create_bucket_configuration(cfg)
+                .send()
+                .await?;
+        }
         println!("✔ Bucket successfully created");
     }
     println!(
@@ -372,6 +390,9 @@ async fn upload_objects_and_head(
     let index_path = index_path_for_branch(&get_current_branch()?);
     let index_content = fs::read(&index_path)?;
     object_content.insert(trim_path(&index_path)?, index_content);
+    let head_path = head_path_for_branch(&get_current_branch()?);
+    let head_content = fs::read(&head_path)?;
+    object_content.insert(trim_path(&head_path)?, head_content);
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
     let mut join_set = JoinSet::new();
     for (k, v) in object_content {
@@ -443,6 +464,8 @@ pub async fn clone(
                 join_set.spawn(async move {
                     let _permit = permit;
                     let (path, contents) = download_object(&bucket_name, &key, client).await?;
+                    let p = PathBuf::from(&path);
+                    fs::create_dir_all(p.parent().unwrap())?;
                     fs::write(path, contents).map_err(|e| anyhow!(e.to_string()))
                 });
             }
@@ -456,18 +479,18 @@ pub async fn clone(
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                eprintln!("Error while uploading the object: {e}");
+                eprintln!("Error while cloning the object: {e}");
                 failed += 1;
             }
             Err(e) => {
-                eprintln!("Error while executing object upload function: {e}");
+                eprintln!("Error while executing object clone function: {e}");
                 panicked += 1;
             } // JoinError
         }
     }
 
     if failed > 0 || panicked > 0 {
-        return Err(anyhow!("{} uploads failed, {} panicked", failed, panicked));
+        return Err(anyhow!("{} clones failed, {} panicked", failed, panicked));
     }
 
     println!("Successfully written the .aggit/ directory");

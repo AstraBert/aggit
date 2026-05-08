@@ -888,6 +888,10 @@ pub fn index_path_for_branch(branch: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(".aggit/refs/index/{}", branch))
 }
 
+pub fn head_path_for_branch(branch: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(".aggit/refs/heads/{}", branch))
+}
+
 /// Switch to a different branch. If `create` is true and the target branch does
 /// not exist, create it from the current branch and commit.
 pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
@@ -1034,12 +1038,15 @@ pub fn collect_reachable_objects(
     let mut queue = vec![head_sha1.to_string()];
 
     while let Some(sha1) = queue.pop() {
+        println!("{sha1}");
         // Stop if we've reached the commit the remote already has
         if remote_head == Some(sha1.as_str()) {
+            println!("Remote head");
             continue;
         }
         // Already visited, skip
         if !visited.insert(sha1.clone()) {
+            println!("Already visited");
             continue;
         }
         let (obj_type, data) = read_object(&sha1)?;
@@ -1048,9 +1055,11 @@ pub fn collect_reachable_objects(
                 let text = String::from_utf8(data)?;
                 for line in text.lines() {
                     if let Some(s) = line.strip_prefix("tree ") {
+                        println!("tree {s}");
                         queue.push(s.to_string());
                     }
                     if let Some(s) = line.strip_prefix("parent ") {
+                        println!("parent {s}");
                         queue.push(s.to_string());
                     }
                 }
@@ -1058,6 +1067,7 @@ pub fn collect_reachable_objects(
             ObjectType::Tree => {
                 let entries = read_tree(None, Some(data))?;
                 for (_, _, sha1) in entries {
+                    println!("tree entry {sha1}");
                     queue.push(sha1);
                 }
             }
