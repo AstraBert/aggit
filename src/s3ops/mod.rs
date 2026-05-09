@@ -1,4 +1,11 @@
-use std::{collections::HashMap, fs, io::Read, path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+};
 
 use anyhow::anyhow;
 use aws_config::{BehaviorVersion, Region, retry::RetryConfig};
@@ -15,7 +22,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{
     gitops::{
         collect_reachable_objects, find_object, get_current_branch, get_local_current_hash,
-        head_path_for_branch, index_path_for_branch, read_object, restore_working_tree,
+        head_path_for_branch, index_path_for_branch, init, restore_working_tree,
     },
     repository::get_repository,
 };
@@ -182,7 +189,7 @@ pub fn manage_origin(
     let validated_action = OriginAction::from_str(action)?;
     match validated_action {
         OriginAction::Create => {
-            if vec![&endpoint, &secret_key, &key_id, &region]
+            if [&endpoint, &secret_key, &key_id, &region]
                 .iter()
                 .any(|x| x.is_none())
             {
@@ -204,7 +211,7 @@ pub fn manage_origin(
             println!("Successfully updated origin {} in {}", name, ORIGIN_FILE);
         }
         OriginAction::Add => {
-            if vec![&endpoint, &secret_key, &key_id, &region]
+            if [&endpoint, &secret_key, &key_id, &region]
                 .iter()
                 .any(|x| x.is_none())
             {
@@ -294,7 +301,7 @@ async fn check_or_create_bucket(origin: &str, client: &Arc<Client>) -> anyhow::R
         origin, repository.name, main_branch
     );
 
-    return Ok(bucket_name);
+    Ok(bucket_name)
 }
 
 async fn get_remote_head(
@@ -364,7 +371,7 @@ async fn download_object(
     Ok((format!(".aggit/{}", key), content))
 }
 
-fn trim_path(path: &PathBuf) -> anyhow::Result<String> {
+fn trim_path(path: &Path) -> anyhow::Result<String> {
     let path_str = path.to_str().ok_or(anyhow!("Non-UTF8 path"))?;
     path_str
         .split_once(".aggit/")
@@ -383,7 +390,7 @@ async fn upload_objects_and_head(
     let mut object_content = HashMap::new();
     for obj in objects {
         let path = find_object(&obj)?;
-        let (_, content) = read_object(&obj)?;
+        let content = fs::read(&path)?;
         object_content.insert(trim_path(&path)?, content);
     }
     object_content.insert("head".to_string(), current_head.into_bytes());
@@ -415,18 +422,22 @@ async fn upload_objects_and_head(
                 success += 1;
             }
             Ok(Err(e)) => {
-                eprintln!("Error while uploading the object: {e}");
+                eprintln!("✗ Error while uploading the object: {e}");
                 failed += 1;
             }
             Err(e) => {
-                eprintln!("Error while executing object upload function: {e}");
+                eprintln!("✗ Error while executing object upload function: {e}");
                 panicked += 1;
             } // JoinError
         }
     }
 
     if failed > 0 || panicked > 0 {
-        return Err(anyhow!("{} uploads failed, {} panicked", failed, panicked));
+        return Err(anyhow!(
+            "✗ {} uploads failed, {} panicked",
+            failed,
+            panicked
+        ));
     }
 
     Ok(success)
@@ -437,8 +448,13 @@ pub async fn push(origin: String) -> anyhow::Result<()> {
     let client = get_client(ori).await;
     let bucket_name = check_or_create_bucket(&origin, &client).await?;
     let remote_head = get_remote_head(&bucket_name, &client).await?;
-    let success = upload_objects_and_head(remote_head.as_deref(), bucket_name, client).await?;
-    println!("Successfully pushed {:?} objects", success);
+    if let Some(h) = &remote_head {
+        println!("✔ Remote head: {h}");
+    } else {
+        println!("↻ No remote head");
+    }
+    upload_objects_and_head(remote_head.as_deref(), bucket_name, client).await?;
+    println!("✔ Successfully pushed to {}", &origin);
 
     Ok(())
 }
@@ -448,6 +464,10 @@ pub async fn clone(
     repository_name: String,
     branch: Option<String>,
 ) -> anyhow::Result<()> {
+    if !PathBuf::from(".aggit/").exists() {
+        println!("↻ aggit repository not initialized, doing it now...");
+        init(PathBuf::from("."))?;
+    }
     let branch = branch.unwrap_or("main".to_string());
     let ori = get_origin(&origin)?;
     let client = get_client(ori).await;
@@ -457,7 +477,9 @@ pub async fn clone(
     let mut join_set: JoinSet<Result<(), anyhow::Error>> = JoinSet::new();
     if let Some(objs) = all_objects.contents {
         for o in objs {
-            if let Some(key) = o.key {
+            if let Some(key) = o.key
+                && key != "head"
+            {
                 let permit = semaphore.clone().acquire_owned().await?;
                 let client = client.clone();
                 let bucket_name = bucket_name.clone();
@@ -479,11 +501,11 @@ pub async fn clone(
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                eprintln!("Error while cloning the object: {e}");
+                eprintln!("✗ Error while cloning the object: {e}");
                 failed += 1;
             }
             Err(e) => {
-                eprintln!("Error while executing object clone function: {e}");
+                eprintln!("✗ Error while executing object clone function: {e}");
                 panicked += 1;
             } // JoinError
         }
@@ -493,11 +515,13 @@ pub async fn clone(
         return Err(anyhow!("{} clones failed, {} panicked", failed, panicked));
     }
 
-    println!("Successfully written the .aggit/ directory");
+    fs::write(".aggit/HEAD", format!("ref: refs/heads/{}", branch))?;
+
+    println!("✔ Successfully written the .aggit/ directory");
 
     restore_working_tree(&branch)?;
 
-    println!("Successfully cloned {} from {}", repository_name, origin);
+    println!("✔ Successfully cloned {} from {}", repository_name, origin);
 
     Ok(())
 }
