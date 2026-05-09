@@ -14,6 +14,16 @@ S3-backed, git-versioned object storage for agents.
 cargo install aggit@0.1.0-alpha
 ```
 
+### As an Agent Skill
+
+You can use `aggit` as an agent skill, downloading it with the `skills` CLI tool:
+
+```bash
+npx skills add AstraBert/aggit
+```
+
+Or copy-pasting the [`SKILL.md`](./skills/aggit/SKILL.md) file to your own skills setup.
+
 ## What It Does
 
 - Initializes an `aggit` repository with internal refs and object storage.
