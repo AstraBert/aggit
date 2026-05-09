@@ -8,6 +8,12 @@ S3-backed, git-versioned object storage for agents.
 >
 > _This software is still in alpha: you might encounter bugs and breaking changes might be introduced in future versions_
 
+## Installation
+
+```bash
+cargo install aggit@0.1.0-alpha
+```
+
 ## What It Does
 
 - Initializes an `aggit` repository with internal refs and object storage.
