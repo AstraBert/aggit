@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>aggit | S3-backed, git-versioned object storage</title>
+        <meta
+            name="description"
+            content="aggit is a Rust CLI for git-like object versioning with S3-compatible push and clone workflows for agent artifacts."
+        />
+        <style>
+            @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+            :root {
+                --bg: #f4f3ee;
+                --paper: #fffef7;
+                --ink: #1d2a34;
+                --muted: #566572;
+                --line: #d6d0c2;
+                --accent: #c0482d;
+                --accent-soft: #ffe2d9;
+                --teal: #1f7668;
+                --shadow: 0 20px 40px rgba(31, 29, 21, 0.08);
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            html,
+            body {
+                min-height: 100%;
+            }
+
+            body {
+                margin: 0;
+                min-height: 100vh;
+                background:
+                    radial-gradient(
+                        circle at 15% 10%,
+                        #fff6d7 0,
+                        transparent 33%
+                    ),
+                    radial-gradient(
+                        circle at 85% 4%,
+                        #dbefe8 0,
+                        transparent 28%
+                    ),
+                    linear-gradient(140deg, #f4f3ee, #ece8dc 75%);
+                background-repeat: no-repeat;
+                background-size: cover;
+                color: var(--ink);
+                font-family: "Space Grotesk", sans-serif;
+            }
+
+            .wrap {
+                width: min(1080px, 92vw);
+                margin: 0 auto;
+            }
+
+            .hero {
+                padding: 4.5rem 0 3rem;
+                display: grid;
+                grid-template-columns: 1.2fr 1fr;
+                gap: 2rem;
+                align-items: center;
+            }
+
+            .badge {
+                display: inline-block;
+                font-family: "IBM Plex Mono", monospace;
+                font-size: 0.78rem;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+                background: var(--accent-soft);
+                border: 1px solid #f5b8a7;
+                color: #82321f;
+                padding: 0.35rem 0.6rem;
+                border-radius: 999px;
+            }
+
+            h1 {
+                margin: 0.9rem 0 0.7rem;
+                font-size: clamp(2rem, 6vw, 4.3rem);
+                line-height: 1.02;
+            }
+
+            .hero p {
+                margin: 0;
+                color: var(--muted);
+                font-size: 1.06rem;
+                max-width: 52ch;
+            }
+
+            .terminal {
+                background: #111820;
+                color: #dce9f8;
+                border-radius: 16px;
+                border: 1px solid #2f3944;
+                box-shadow: var(--shadow);
+                overflow: hidden;
+                transform: rotate(-1.2deg);
+            }
+
+            .terminal-head {
+                padding: 0.65rem 0.9rem;
+                border-bottom: 1px solid #2f3944;
+                display: flex;
+                gap: 0.45rem;
+            }
+
+            .dot {
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+            }
+
+            .dot:nth-child(1) {
+                background: #f17f72;
+            }
+            .dot:nth-child(2) {
+                background: #f6be67;
+            }
+            .dot:nth-child(3) {
+                background: #5fc58f;
+            }
+
+            pre {
+                margin: 0;
+                padding: 1rem;
+                font-family: "IBM Plex Mono", monospace;
+                font-size: 0.86rem;
+                line-height: 1.6;
+                white-space: pre-wrap;
+            }
+
+            section {
+                margin: 2.1rem 0;
+            }
+
+            h2 {
+                margin: 0 0 1rem;
+                font-size: 1.45rem;
+            }
+
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 1rem;
+            }
+
+            .card {
+                background: var(--paper);
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 1rem;
+                box-shadow: var(--shadow);
+            }
+
+            .card h3 {
+                margin: 0 0 0.4rem;
+                font-size: 1.05rem;
+            }
+
+            .card p,
+            .under-hood p {
+                margin: 0;
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            .under-hood {
+                background: var(--paper);
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 1.2rem;
+                box-shadow: var(--shadow);
+            }
+
+            .repo-link {
+                display: inline-block;
+                margin-top: 0.8rem;
+                color: var(--teal);
+                font-weight: 700;
+                text-decoration-thickness: 2px;
+                text-underline-offset: 2px;
+            }
+
+            .footer {
+                margin: 3rem 0 2.3rem;
+                color: var(--muted);
+                font-size: 0.88rem;
+            }
+
+            .reveal {
+                animation: rise 550ms ease both;
+            }
+
+            .reveal:nth-child(2) {
+                animation-delay: 90ms;
+            }
+            .reveal:nth-child(3) {
+                animation-delay: 140ms;
+            }
+
+            @keyframes rise {
+                from {
+                    opacity: 0;
+                    transform: translateY(10px);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
+            }
+
+            @media (max-width: 900px) {
+                .hero {
+                    grid-template-columns: 1fr;
+                }
+                .grid {
+                    grid-template-columns: 1fr;
+                }
+                .terminal {
+                    transform: none;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <main class="wrap">
+            <section class="hero">
+                <div class="reveal">
+                    <span class="badge">Rust CLI + S3</span>
+                    <h1>aggit</h1>
+                    <p>
+                        S3-backed, git-versioned object storage for agents.
+                        Track local files as compressed objects, branch safely,
+                        and sync reachable history to S3-compatible remotes.
+                    </p>
+                </div>
+                <div class="terminal reveal" aria-label="aggit command preview">
+                    <div class="terminal-head">
+                        <span class="dot"></span><span class="dot"></span
+                        ><span class="dot"></span>
+                    </div>
+                    <pre>
+$ aggit init .
+$ aggit author -n "Jane Doe" -e "jane@example.com"
+$ aggit add notes.txt
+$ aggit commit -m "initial commit"
+$ aggit origin create prod -e https://s3.example.com -s *** -k *** -r us-east-1
+$ aggit push prod</pre
+                    >
+                </div>
+            </section>
+
+            <section>
+                <h2>Core Capabilities</h2>
+                <div class="grid">
+                    <article class="card reveal">
+                        <h3>Git-like Local Engine</h3>
+                        <p>
+                            `blob`, `tree`, and `commit` objects are stored
+                            under `.aggit/objects` with branch-aware refs and
+                            index.
+                        </p>
+                    </article>
+                    <article class="card reveal">
+                        <h3>Branching + Recovery</h3>
+                        <p>
+                            Switch branches with clean-state checks, restore
+                            working trees from committed snapshots, and inspect
+                            history objects.
+                        </p>
+                    </article>
+                    <article class="card reveal">
+                        <h3>S3 Sync</h3>
+                        <p>
+                            Push only reachable objects beyond remote head;
+                            clone remotes back into `.aggit` and materialize
+                            files locally.
+                        </p>
+                    </article>
+                </div>
+            </section>
+
+            <section>
+                <h2>How It Works</h2>
+                <article class="under-hood reveal">
+                    <p>
+                        `aggit` keeps a minimal Git-like store inside `.aggit/`:
+                        file contents are hashed into compressed objects, index
+                        entries are tracked per branch, and commits link trees
+                        plus parent pointers. On push, it computes objects
+                        reachable from local head and uploads only what the
+                        remote bucket is missing, alongside branch head and
+                        index. Clone performs the inverse: downloads `.aggit`
+                        data from S3 and restores the working tree from the
+                        selected branch commit.
+                    </p>
+                    <a
+                        class="repo-link"
+                        href="https://github.com/AstraBert/aggit"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >
+                        View the GitHub repository
+                    </a>
+                </article>
+            </section>
+
+            <section class="footer">
+                <strong>Storage model:</strong> buckets are named as
+                <code
+                    >&lt;origin&gt;-&lt;repository-name&gt;-&lt;branch&gt;</code
+                >
+                and include reachable objects, branch head, and branch index.
+            </section>
+        </main>
+    </body>
+</html>
