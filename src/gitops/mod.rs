@@ -141,31 +141,28 @@ fn write_file(path: &PathBuf, data: Vec<u8>) -> Result<(), std::io::Error> {
 /// Create directory for repo (if it does not already exist) and initialize .aggit directory
 pub fn init(repository: PathBuf) -> Result<(), std::io::Error> {
     fs::create_dir_all(&repository)?;
-    fs::create_dir_all(&repository.join(".aggit"))?;
+    fs::create_dir_all(repository.join(".aggit"))?;
     let git_folders: [&str; 4] = ["objects", "refs", "refs/heads", "refs/index"];
     for g in git_folders {
-        fs::create_dir_all(&repository.join(".aggit").join(g))?;
+        fs::create_dir_all(repository.join(".aggit").join(g))?;
     }
     write_file(
         &repository.join(".aggit").join("HEAD"),
         "ref: refs/heads/main".into(),
     )?;
-    println!(
-        "\x1b[1;93mRepository {:?} successfully initialized",
-        &repository
-    );
+    println!("Repository {:?} successfully initialized", &repository);
 
     Ok(())
 }
 
-fn compress(data: &mut Vec<u8>) -> anyhow::Result<Vec<u8>> {
+fn compress(data: &mut [u8]) -> anyhow::Result<Vec<u8>> {
     let mut encoder = ZlibEncoder::new(&data[..], Compression::default());
     let mut compressed = Vec::new();
     encoder.read_to_end(&mut compressed)?;
     Ok(compressed)
 }
 
-fn decompress(data: &mut Vec<u8>) -> anyhow::Result<Vec<u8>> {
+fn decompress(data: &mut [u8]) -> anyhow::Result<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(&data[..]);
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed)?;
@@ -214,7 +211,7 @@ pub fn find_object(sha1_prefix: &str) -> anyhow::Result<PathBuf> {
             .file_name()
             .to_string_lossy()
             .to_string()
-            .starts_with(&rest)
+            .starts_with(rest)
         {
             objects.push(entry.file_name().to_string_lossy().to_string());
         }
@@ -471,7 +468,6 @@ pub fn get_status() -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let entries_paths: HashSet<String> = entries_by_path.keys().map(|s| s.to_owned()).collect();
     let changed: HashSet<String> = entries_paths
         .intersection(&paths)
-        .into_iter()
         .filter(|p| {
             let mut data = read_file(&PathBuf::from(p)).unwrap();
             let obj_hash = hash_object(&mut data, ObjectType::Blob, false).unwrap();
@@ -482,12 +478,10 @@ pub fn get_status() -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
         .collect();
     let new: HashSet<String> = paths
         .difference(&entries_paths)
-        .into_iter()
         .map(|e| e.to_string())
         .collect();
     let deleted: HashSet<String> = entries_paths
         .difference(&paths)
-        .into_iter()
         .map(|e| e.to_string())
         .collect();
     let mut changed_vec: Vec<String> = changed.into_iter().collect();
@@ -595,7 +589,7 @@ pub fn write_index(entries: &[IndexEntry]) -> anyhow::Result<()> {
         data.extend_from_slice(path);
         let length = ((62 + path.len() + 8) / 8) * 8;
         let padding = length - 62 - path.len();
-        data.extend(std::iter::repeat(0u8).take(padding));
+        data.extend(std::iter::repeat_n(0u8, padding));
     }
 
     // Append SHA1 digest of everything written so far
@@ -615,14 +609,14 @@ pub fn add(paths: Vec<String>) -> anyhow::Result<()> {
     let mut entries: Vec<IndexEntry> = all_entries
         .iter()
         .filter(|e| !replaced.contains(&e.path))
-        .map(|e| e.clone())
+        .cloned()
         .collect();
     for path in replaced {
         let mut data = read_file(&PathBuf::from(&path))?;
         let sha1 = hash_object(&mut data, ObjectType::Blob, true)?;
         let st = fs::metadata(&path)?;
-        let flags = path.as_bytes().len() as u16;
-        if !(flags < (1 << 12)) {
+        let flags = path.len() as u16;
+        if flags >= (1 << 12) {
             return Err(anyhow!("Invalid flags"));
         }
         let sha1_bytes: [u8; 20] = hex::decode(&sha1)?
@@ -796,7 +790,7 @@ pub fn config_author(name: String, email: String) -> anyhow::Result<()> {
         .expect("Should have a global confing directory")
         .join(".aggit")
         .join("author.toml");
-    fs::create_dir_all(&config_file.parent().unwrap())?;
+    fs::create_dir_all(config_file.parent().unwrap())?;
     let author = CommitAuthor { name, email };
     let toml_str = toml::to_string(&author)?;
     fs::write(&config_file, toml_str)?;
@@ -875,7 +869,7 @@ pub fn list_branches() -> anyhow::Result<()> {
     let mut other_branches = Vec::new();
     for entry in entries {
         let entry = entry?;
-        if &entry.file_name().to_str().unwrap() != &current_branch {
+        if entry.file_name().to_str().unwrap() != current_branch {
             other_branches.push(entry.file_name().to_string_lossy().to_string());
         }
     }
@@ -994,17 +988,26 @@ pub fn restore_working_tree(branch_name: &str) -> anyhow::Result<()> {
 
     // Restore each file in the working tree
     for (mode, path, sha1) in &tree_entries {
-        let (_, file_data) = read_object(sha1)?;
-        fs::write(path, &file_data)?;
-        fs::set_permissions(path, Permissions::from_mode(*mode))?;
+        if *mode == 0o40000 {
+            fs::create_dir_all(path)?;
+        } else {
+            let (_, file_data) = read_object(sha1)?;
+            if let Some(par) = PathBuf::from(path).parent()
+                && !par.exists()
+            {
+                fs::create_dir_all(par)?;
+            }
+            fs::write(path, &file_data)?;
+            fs::set_permissions(path, Permissions::from_mode(*mode))?;
+        }
     }
 
     // Rebuild the index from the tree entries to match
     let index_entries: Vec<IndexEntry> = tree_entries
         .iter()
         .map(|(mode, path, sha1)| {
-            let flags = path.as_bytes().len() as u16;
-            if !(flags < (1 << 12)) {
+            let flags = path.len() as u16;
+            if flags >= (1 << 12) {
                 return Err(anyhow!("Invalid flags"));
             }
             let meta = fs::metadata(path)?; // stat the just-written file
