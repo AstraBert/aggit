@@ -1,7 +1,12 @@
 [package]
 name = "aggit"
-version = "0.1.0"
+version = "0.1.0-alpha"
 edition = "2024"
+license-file = "LICENSE"
+readme = "README.md"
+repository = "https://github.com/AstraBert/aggit"
+description = "S3-backed, git-versioned object storage for agents"
+keywords = ["ai", "agents", "git", "s3"]
 
 [dependencies]
 aws-config = { version = "1.8.15", features = ["behavior-version-latest"] }
