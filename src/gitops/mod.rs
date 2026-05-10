@@ -463,8 +463,11 @@ pub fn get_status() -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
         }
     }
     let entries = read_index()?;
-    let entries_by_path: HashMap<String, IndexEntry> =
-        entries.into_iter().map(|e| (e.path.clone(), e)).collect();
+    let entries_by_path: HashMap<String, IndexEntry> = entries
+        .into_iter()
+        .filter(|e| PathBuf::from(&e.path).is_file())
+        .map(|e| (e.path.clone(), e))
+        .collect();
     let entries_paths: HashSet<String> = entries_by_path.keys().map(|s| s.to_owned()).collect();
     let changed: HashSet<String> = entries_paths
         .intersection(&paths)
@@ -1080,13 +1083,26 @@ pub fn collect_reachable_objects(
 }
 
 pub fn checkout_commit(commit_hash: String) -> anyhow::Result<()> {
-    // check if current working tree is dirty (uncommitted changes)
+    // Check that current working tree is not dirty
     let (changed, new, deleted) = get_status()?;
     if !changed.is_empty() || !new.is_empty() || !deleted.is_empty() {
         return Err(anyhow!(
             "Current working tree has uncommitted changes. Please commit them and re-try"
         ));
     }
+
+    // Validate SHA1 exists and is a commit
+    match read_object(&commit_hash) {
+        Err(_) => {
+            return Err(anyhow!("commit {commit_hash} not found"));
+        }
+        Ok((obj_type, _)) => {
+            if obj_type != ObjectType::Commit {
+                return Err(anyhow!("{commit_hash} is not a commit, it's a {obj_type}"));
+            }
+        }
+    }
+
     let (head, _) = get_local_current_hash()?;
     if let Some(h) = head
         && h == commit_hash
@@ -1094,7 +1110,20 @@ pub fn checkout_commit(commit_hash: String) -> anyhow::Result<()> {
         println!("Already at {commit_hash}");
         return Ok(());
     }
-    restore_working_tree(commit_hash)?;
 
+    match get_current_branch() {
+        Ok(branch) => {
+            let branch_path = PathBuf::from(".aggit")
+                .join("refs")
+                .join("heads")
+                .join(branch);
+            fs::write(branch_path, format!("{commit_hash}\n"))?;
+        }
+        Err(_) => {
+            // detached HEAD — no branch ref to update
+        }
+    }
+
+    restore_working_tree(commit_hash)?;
     Ok(())
 }
