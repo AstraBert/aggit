@@ -463,8 +463,11 @@ pub fn get_status() -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>)> {
         }
     }
     let entries = read_index()?;
-    let entries_by_path: HashMap<String, IndexEntry> =
-        entries.into_iter().map(|e| (e.path.clone(), e)).collect();
+    let entries_by_path: HashMap<String, IndexEntry> = entries
+        .into_iter()
+        .filter(|e| PathBuf::from(&e.path).is_file())
+        .map(|e| (e.path.clone(), e))
+        .collect();
     let entries_paths: HashSet<String> = entries_by_path.keys().map(|s| s.to_owned()).collect();
     let changed: HashSet<String> = entries_paths
         .intersection(&paths)
@@ -919,7 +922,7 @@ pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
         ));
     } else if branch_path.exists() && !create {
         // restore working tree
-        restore_working_tree(name)?;
+        restore_branch_working_tree(name)?;
         // set branch as current
         fs::write(&head_path, format!("ref: refs/heads/{}", name))?;
         println!("Switched to branch {}", name);
@@ -958,7 +961,7 @@ pub fn switch_branch(name: &str, create: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn restore_working_tree(branch_name: &str) -> anyhow::Result<()> {
+pub fn restore_branch_working_tree(branch_name: &str) -> anyhow::Result<()> {
     let branch_path = PathBuf::from(".aggit/refs/heads").join(branch_name);
     let commit_hash = fs::read_to_string(&branch_path)?.trim().to_string();
 
@@ -967,6 +970,10 @@ pub fn restore_working_tree(branch_name: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    restore_working_tree(commit_hash)
+}
+
+pub fn restore_working_tree(commit_hash: String) -> anyhow::Result<()> {
     // Read the commit object to get the tree SHA1
     let (obj_type, commit_data) = read_object(&commit_hash)?;
     if !matches!(obj_type, ObjectType::Commit) {
@@ -1073,4 +1080,50 @@ pub fn collect_reachable_objects(
         }
     }
     Ok(visited)
+}
+
+pub fn checkout_commit(commit_hash: String) -> anyhow::Result<()> {
+    // Check that current working tree is not dirty
+    let (changed, new, deleted) = get_status()?;
+    if !changed.is_empty() || !new.is_empty() || !deleted.is_empty() {
+        return Err(anyhow!(
+            "Current working tree has uncommitted changes. Please commit them and re-try"
+        ));
+    }
+
+    // Validate SHA1 exists and is a commit
+    match read_object(&commit_hash) {
+        Err(_) => {
+            return Err(anyhow!("commit {commit_hash} not found"));
+        }
+        Ok((obj_type, _)) => {
+            if obj_type != ObjectType::Commit {
+                return Err(anyhow!("{commit_hash} is not a commit, it's a {obj_type}"));
+            }
+        }
+    }
+
+    let (head, _) = get_local_current_hash()?;
+    if let Some(h) = head
+        && h == commit_hash
+    {
+        println!("Already at {commit_hash}");
+        return Ok(());
+    }
+
+    match get_current_branch() {
+        Ok(branch) => {
+            let branch_path = PathBuf::from(".aggit")
+                .join("refs")
+                .join("heads")
+                .join(branch);
+            fs::write(branch_path, format!("{commit_hash}\n"))?;
+        }
+        Err(_) => {
+            // detached HEAD — no branch ref to update
+        }
+    }
+
+    restore_working_tree(commit_hash)?;
+    Ok(())
 }
