@@ -65,6 +65,14 @@ aggit add <file1> <file2> ...
 aggit commit -m "checkpoint: <what changed>"
 ```
 
+### Revert to a previous commit
+
+```bash
+aggit checkout <commit-sha-prefix>
+```
+
+> NOTE: differently from `git`, `checkout` only works with commit SHA1 hashes (or prefixes) and not with branch names.
+
 ### Inspect state
 
 ```bash
