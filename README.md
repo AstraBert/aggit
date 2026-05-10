@@ -30,7 +30,7 @@ Or copy-pasting the [`SKILL.md`](./skills/aggit/SKILL.md) file to your own skill
 - Hashes file contents into compressed objects (`blob`, `tree`, `commit`) under `.aggit/objects`.
 - Tracks staged files in a branch-specific index (`.aggit/refs/index/<branch>`).
 - Supports core local VCS-like commands:
-  - `add`, `commit`, `status`, `diff`, `ls`, `cat`
+  - `add`, `commit`, `checkout`, `status`, `diff`, `ls`, `cat`
   - `switch` (branch switching/creation)
   - `branch` (list local branches)
 - Stores global commit author config at `~/.config/.aggit/author.toml`.
@@ -50,11 +50,12 @@ Or copy-pasting the [`SKILL.md`](./skills/aggit/SKILL.md) file to your own skill
 - `aggit repo <name> [-d <description>] [-t <topic> ...]`: configure repository metadata
 - `aggit add <files...>`: stage files
 - `aggit commit -m <message>`: commit staged state
+- `aggit checkout <commit_sha>`: restore working tree/index to a specific commit (commit-only checkout)
 - `aggit status`: show changed/new/deleted files vs index
 - `aggit diff`: show unified diff of working copy vs index
 - `aggit ls [-d]`: list index entries (`-d` for mode/SHA/stage)
 - `aggit cat -m <mode> -s <sha1-prefix>`: inspect objects (`blob|tree|commit|type|size|pretty`)
-- `aggit switch <branch> [-c]`: switch branch, optionally create
+- `aggit switch <branch> [-c]`: switch branch, optionally create (branch switching is done with `switch`, not `checkout`)
 - `aggit branch`: list branches
 - `aggit origin <create|add|update> <name> -e <endpoint> -s <secret> -k <key_id> -r <region>`
 - `aggit push <origin>`: push current branch objects/head/index to remote bucket
