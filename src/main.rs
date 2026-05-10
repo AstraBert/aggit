@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     gitops::{
-        add, cat_file, commit, config_author, diff, init, list_branches, ls_files, status,
-        switch_branch,
+        add, cat_file, checkout_commit, commit, config_author, diff, init, list_branches, ls_files,
+        status, switch_branch,
     },
     repository::config_repository,
     s3ops::{clone, manage_origin, push},
@@ -159,6 +159,13 @@ enum Commands {
         #[arg(short, long, default_value = None)]
         branch: Option<String>,
     },
+
+    /// Restore the working tree state
+    /// reverting to a previous commit
+    Checkout {
+        /// SHA-1 hash (or prefix) of the commit to revert to
+        commit: String,
+    },
 }
 
 #[tokio::main]
@@ -225,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
             branch,
         } => {
             clone(origin, name, branch).await?;
+        }
+        Commands::Checkout { commit } => {
+            checkout_commit(commit)?;
         }
     }
 

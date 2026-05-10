@@ -22,7 +22,7 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{
     gitops::{
         collect_reachable_objects, find_object, get_current_branch, get_local_current_hash,
-        head_path_for_branch, index_path_for_branch, init, restore_working_tree,
+        head_path_for_branch, index_path_for_branch, init, restore_branch_working_tree,
     },
     repository::get_repository,
 };
@@ -519,7 +519,7 @@ pub async fn clone(
 
     println!("✔ Successfully written the .aggit/ directory");
 
-    restore_working_tree(&branch)?;
+    restore_branch_working_tree(&branch)?;
 
     println!("✔ Successfully cloned {} from {}", repository_name, origin);
 
