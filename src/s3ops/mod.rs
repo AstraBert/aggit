@@ -525,3 +525,227 @@ pub async fn clone(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn cleanup_origin_file() {
+        let _ = fs::remove_file(ORIGIN_FILE);
+    }
+
+    #[test]
+    fn test_origin_action_from_str() {
+        assert!(matches!(
+            OriginAction::from_str("add").unwrap(),
+            OriginAction::Add
+        ));
+        assert!(matches!(
+            OriginAction::from_str("create").unwrap(),
+            OriginAction::Create
+        ));
+        assert!(matches!(
+            OriginAction::from_str("update").unwrap(),
+            OriginAction::Update
+        ));
+        assert!(OriginAction::from_str("delete").is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_create_origin_success() {
+        cleanup_origin_file();
+        let result = manage_origin(
+            "create",
+            "origin1",
+            Some("http://localhost:9000".to_string()),
+            Some("secret".to_string()),
+            Some("keyid".to_string()),
+            Some("us-east-1".to_string()),
+        );
+        assert!(result.is_ok());
+        assert!(PathBuf::from(ORIGIN_FILE).exists());
+        let content = fs::read_to_string(ORIGIN_FILE).unwrap();
+        assert!(content.contains("origin1"));
+        assert!(content.contains("http://localhost:9000"));
+        cleanup_origin_file();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_create_origin_already_exists() {
+        cleanup_origin_file();
+        manage_origin(
+            "create",
+            "origin1",
+            Some("http://localhost:9000".to_string()),
+            Some("secret".to_string()),
+            Some("keyid".to_string()),
+            Some("us-east-1".to_string()),
+        )
+        .unwrap();
+
+        let result = manage_origin(
+            "create",
+            "origin2",
+            Some("http://localhost:9001".to_string()),
+            Some("secret2".to_string()),
+            Some("keyid2".to_string()),
+            Some("us-east-1".to_string()),
+        );
+        assert!(result.is_err());
+        cleanup_origin_file();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_add_origin_success() {
+        cleanup_origin_file();
+        manage_origin(
+            "create",
+            "origin1",
+            Some("http://localhost:9000".to_string()),
+            Some("secret".to_string()),
+            Some("keyid".to_string()),
+            Some("us-east-1".to_string()),
+        )
+        .unwrap();
+
+        let result = manage_origin(
+            "add",
+            "origin2",
+            Some("http://localhost:9001".to_string()),
+            Some("secret2".to_string()),
+            Some("keyid2".to_string()),
+            Some("us-east-1".to_string()),
+        );
+        assert!(result.is_ok());
+        let content = fs::read_to_string(ORIGIN_FILE).unwrap();
+        assert!(content.contains("origin1"));
+        assert!(content.contains("origin2"));
+        cleanup_origin_file();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_add_origin_duplicate_name() {
+        cleanup_origin_file();
+        manage_origin(
+            "create",
+            "origin1",
+            Some("http://localhost:9000".to_string()),
+            Some("secret".to_string()),
+            Some("keyid".to_string()),
+            Some("us-east-1".to_string()),
+        )
+        .unwrap();
+
+        let result = manage_origin(
+            "add",
+            "origin1",
+            Some("http://localhost:9001".to_string()),
+            Some("secret2".to_string()),
+            Some("keyid2".to_string()),
+            Some("us-east-1".to_string()),
+        );
+        assert!(result.is_err());
+        cleanup_origin_file();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_update_origin_success() {
+        cleanup_origin_file();
+        manage_origin(
+            "create",
+            "origin1",
+            Some("http://localhost:9000".to_string()),
+            Some("secret".to_string()),
+            Some("keyid".to_string()),
+            Some("us-east-1".to_string()),
+        )
+        .unwrap();
+
+        let result = manage_origin(
+            "update",
+            "origin1",
+            Some("http://localhost:9002".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_ok());
+        let content = fs::read_to_string(ORIGIN_FILE).unwrap();
+        assert!(content.contains("http://localhost:9002"));
+        cleanup_origin_file();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_update_origin_not_found() {
+        cleanup_origin_file();
+        manage_origin(
+            "create",
+            "origin1",
+            Some("http://localhost:9000".to_string()),
+            Some("secret".to_string()),
+            Some("keyid".to_string()),
+            Some("us-east-1".to_string()),
+        )
+        .unwrap();
+
+        let result = manage_origin(
+            "update",
+            "nonexistent",
+            Some("http://localhost:9002".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        cleanup_origin_file();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_manage_origin_missing_fields_for_create() {
+        cleanup_origin_file();
+        let result = manage_origin(
+            "create",
+            "origin1",
+            Some("http://localhost:9000".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        cleanup_origin_file();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_add_origin_to_gitignore() {
+        cleanup_origin_file();
+        add_origin_to_gitignore().unwrap();
+        let gitignore = fs::read_to_string(GITIGNORE).unwrap();
+        let aggitignore = fs::read_to_string(AGGITIGNORE).unwrap();
+        assert!(gitignore.contains(ORIGIN_FILE));
+        assert!(aggitignore.contains(ORIGIN_FILE));
+        cleanup_origin_file();
+    }
+
+    #[test]
+    fn test_trim_path_valid() {
+        let path = Path::new("some/path/.aggit/objects/ab/cd");
+        let result = trim_path(path).unwrap();
+        assert_eq!(result, "objects/ab/cd");
+    }
+
+    #[test]
+    fn test_trim_path_invalid() {
+        let path = Path::new("some/path/without/aggit");
+        let result = trim_path(path);
+        assert!(result.is_err());
+    }
+}

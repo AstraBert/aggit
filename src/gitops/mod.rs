@@ -1127,3 +1127,202 @@ pub fn checkout_commit(commit_hash: String) -> anyhow::Result<()> {
     restore_working_tree(commit_hash)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn setup_test_repo() {
+        let _ = fs::remove_dir_all(".aggit");
+        init(PathBuf::from(".")).unwrap();
+    }
+
+    fn cleanup_test_repo() {
+        let _ = fs::remove_dir_all(".aggit");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_init_creates_directories() {
+        cleanup_test_repo();
+        let repo = PathBuf::from(".aggit_test_repo");
+        let _ = fs::remove_dir_all(&repo);
+        init(repo.clone()).unwrap();
+        assert!(repo.join(".aggit").exists());
+        assert!(repo.join(".aggit/objects").exists());
+        assert!(repo.join(".aggit/refs/heads").exists());
+        assert!(repo.join(".aggit/refs/index").exists());
+        let head = fs::read_to_string(repo.join(".aggit/HEAD")).unwrap();
+        assert_eq!(head, "ref: refs/heads/main");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_hash_object_without_write() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let mut data = b"hello world".to_vec();
+        let hash = hash_object(&mut data, ObjectType::Blob, false).unwrap();
+        assert_eq!(hash.len(), 40);
+        let path = PathBuf::from(".aggit/objects")
+            .join(&hash[..2])
+            .join(&hash[2..]);
+        assert!(!path.exists());
+        cleanup_test_repo();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_hash_object_with_write() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let mut data = b"hello world".to_vec();
+        let hash = hash_object(&mut data, ObjectType::Blob, true).unwrap();
+        let path = PathBuf::from(".aggit/objects")
+            .join(&hash[..2])
+            .join(&hash[2..]);
+        assert!(path.exists());
+        cleanup_test_repo();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_find_object_success() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let mut data = b"find me".to_vec();
+        let hash = hash_object(&mut data, ObjectType::Blob, true).unwrap();
+        let found = find_object(&hash).unwrap();
+        assert!(found.to_string_lossy().contains(&hash[..2]));
+        cleanup_test_repo();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_find_object_not_found() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let result = find_object("0000000000000000000000000000000000000000");
+        assert!(result.is_err());
+        cleanup_test_repo();
+    }
+
+    #[test]
+    fn test_read_object_roundtrip() {
+        let data = b"roundtrip data".to_vec();
+        let hash = hash_object(&mut data.clone(), ObjectType::Blob, true).unwrap();
+        let (obj_type, read_data) = read_object(&hash).unwrap();
+        assert_eq!(obj_type, ObjectType::Blob);
+        assert_eq!(read_data, b"roundtrip data");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_get_current_branch() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let branch = get_current_branch().unwrap();
+        assert_eq!(branch, "main");
+        cleanup_test_repo();
+    }
+
+    #[test]
+    fn test_index_path_for_branch() {
+        let path = index_path_for_branch("main");
+        assert_eq!(path, PathBuf::from(".aggit/refs/index/main"));
+    }
+
+    #[test]
+    fn test_head_path_for_branch() {
+        let path = head_path_for_branch("main");
+        assert_eq!(path, PathBuf::from(".aggit/refs/heads/main"));
+    }
+
+    #[test]
+    fn test_object_type_from_str() {
+        assert_eq!(ObjectType::from_str("blob").unwrap(), ObjectType::Blob);
+        assert_eq!(ObjectType::from_str("commit").unwrap(), ObjectType::Commit);
+        assert_eq!(ObjectType::from_str("tree").unwrap(), ObjectType::Tree);
+        assert!(ObjectType::from_str("unknown").is_err());
+    }
+
+    #[test]
+    fn test_cat_file_mode_from_str() {
+        assert!(CatFileMode::from_str("blob").is_ok());
+        assert!(CatFileMode::from_str("size").is_ok());
+        assert!(CatFileMode::from_str("type").is_ok());
+        assert!(CatFileMode::from_str("pretty").is_ok());
+        assert!(CatFileMode::from_str("invalid").is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_write_and_read_index() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let entries = vec![IndexEntry {
+            ctime_s: 0,
+            ctime_n: 0,
+            mtime_s: 0,
+            mtime_n: 0,
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            size: 5,
+            sha1: [0u8; 20],
+            flags: 4,
+            path: "test.txt".to_string(),
+        }];
+        write_index(&entries).unwrap();
+        let read = read_index().unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].path, "test.txt");
+        cleanup_test_repo();
+    }
+
+    #[test]
+    fn test_read_tree_with_data() {
+        let mut tree_data = Vec::new();
+        tree_data.extend_from_slice(b"100644 file.txt\x00");
+        tree_data.extend_from_slice(&[0u8; 20]);
+        let entries = read_tree(None, Some(tree_data)).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, "file.txt");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_get_local_current_hash_no_commits() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let (hash, branch) = get_local_current_hash().unwrap();
+        assert!(hash.is_none());
+        assert_eq!(branch, "main");
+        cleanup_test_repo();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_list_branches_no_error() {
+        cleanup_test_repo();
+        setup_test_repo();
+        list_branches().unwrap();
+        cleanup_test_repo();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_collect_reachable_objects_blob_only() {
+        cleanup_test_repo();
+        setup_test_repo();
+        let mut data = b"blob content".to_vec();
+        let hash = hash_object(&mut data, ObjectType::Blob, true).unwrap();
+        let objects = collect_reachable_objects(&hash, None).unwrap();
+        assert!(objects.contains(&hash));
+        cleanup_test_repo();
+    }
+}
