@@ -11,8 +11,13 @@ S3-backed, git-versioned object storage for agents.
 ## Installation
 
 ```bash
-cargo install aggit@0.1.0-alpha
+cargo install aggit@0.2.0-alpha
 ```
+
+
+> [!NOTE]
+>
+> `aggit` is not yet compatible with Windows.
 
 ### As an Agent Skill
 
