@@ -1310,6 +1310,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_read_object_roundtrip() {
         let data = b"roundtrip data".to_vec();
         let hash = hash_object(&mut data.clone(), ObjectType::Blob, true).unwrap();
