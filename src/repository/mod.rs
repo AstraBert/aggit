@@ -135,4 +135,3 @@ mod tests {
         cleanup_aggit_dir();
     }
 }
-
