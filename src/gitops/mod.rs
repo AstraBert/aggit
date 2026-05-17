@@ -9,11 +9,9 @@ use flate2::{
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sha1_checked::{Digest, Sha1};
-use std::{
-    collections::HashMap,
-    fs::Permissions,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-};
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::{collections::HashSet, time::SystemTime};
 use std::{fmt, fs, path::PathBuf, str::FromStr};
 use std::{
@@ -1056,7 +1054,16 @@ pub fn restore_working_tree(commit_hash: String) -> anyhow::Result<()> {
                 fs::create_dir_all(par)?;
             }
             fs::write(path, &file_data)?;
-            fs::set_permissions(path, Permissions::from_mode(*mode))?;
+            #[cfg(unix)]
+            fs::set_permissions(&path, fs::Permissions::from_mode(*mode))?;
+
+            #[cfg(not(unix))]
+            {
+                let mut perms = fs::metadata(&path)?.permissions();
+                let readonly = (*mode & 0o200) == 0; // owner write bit unset = readonly
+                perms.set_readonly(readonly);
+                fs::set_permissions(&path, perms)?;
+            }
         }
     }
 
