@@ -38,3 +38,28 @@ jobs:
 
       - name: Run tests
         run: jake test
+
+  test-windows:
+    name: Test on windows-latest
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.os == 'Windows' && '~\\.cargo\\registry' || '~/.cargo/registry' }}
+            ${{ runner.os == 'Windows' && '~\\.cargo\\git' || '~/.cargo/git' }}
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: cargo test

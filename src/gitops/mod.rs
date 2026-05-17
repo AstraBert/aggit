@@ -9,11 +9,9 @@ use flate2::{
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sha1_checked::{Digest, Sha1};
-use std::{
-    collections::HashMap,
-    fs::Permissions,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-};
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::{collections::HashSet, time::SystemTime};
 use std::{fmt, fs, path::PathBuf, str::FromStr};
 use std::{
@@ -626,18 +624,69 @@ pub fn add(paths: Vec<String>) -> anyhow::Result<()> {
             .try_into()
             .map_err(|_| anyhow::anyhow!("SHA1 hash must be 20 bytes"))?;
         let entry = IndexEntry {
-            ctime_s: st.ctime() as u32,
-            ctime_n: st.ctime_nsec() as u32,
-            mtime_n: st.mtime() as u32,
-            mtime_s: st.mtime_nsec() as u32,
-            dev: st.dev() as u32,
-            ino: st.ino() as u32,
-            size: st.size() as u32,
-            gid: st.gid(),
-            uid: st.uid(),
-            mode: st.mode(),
-            flags,
             sha1: sha1_bytes,
+            flags,
+            size: st.len() as u32,
+
+            #[cfg(unix)]
+            ctime_s: st.ctime() as u32,
+            #[cfg(not(unix))]
+            ctime_s: st
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0),
+
+            #[cfg(unix)]
+            ctime_n: st.ctime_nsec() as u32,
+            #[cfg(not(unix))]
+            ctime_n: 0,
+
+            #[cfg(unix)]
+            mtime_s: st.mtime() as u32,
+            #[cfg(not(unix))]
+            mtime_s: st
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as u32)
+                .unwrap_or(0),
+
+            #[cfg(unix)]
+            mtime_n: st.mtime_nsec() as u32,
+            #[cfg(not(unix))]
+            mtime_n: 0,
+
+            #[cfg(unix)]
+            dev: st.dev() as u32,
+            #[cfg(not(unix))]
+            dev: 0,
+
+            #[cfg(unix)]
+            ino: st.ino() as u32,
+            #[cfg(not(unix))]
+            ino: 0,
+
+            #[cfg(unix)]
+            mode: st.mode(),
+            #[cfg(not(unix))]
+            mode: if st.permissions().readonly() {
+                0o100444
+            } else {
+                0o100644
+            },
+
+            #[cfg(unix)]
+            uid: st.uid(),
+            #[cfg(not(unix))]
+            uid: 0,
+
+            #[cfg(unix)]
+            gid: st.gid(),
+            #[cfg(not(unix))]
+            gid: 0,
+
             path,
         };
         entries.push(entry);
@@ -1005,7 +1054,16 @@ pub fn restore_working_tree(commit_hash: String) -> anyhow::Result<()> {
                 fs::create_dir_all(par)?;
             }
             fs::write(path, &file_data)?;
-            fs::set_permissions(path, Permissions::from_mode(*mode))?;
+            #[cfg(unix)]
+            fs::set_permissions(&path, fs::Permissions::from_mode(*mode))?;
+
+            #[cfg(not(unix))]
+            {
+                let mut perms = fs::metadata(&path)?.permissions();
+                let readonly = (*mode & 0o200) == 0; // owner write bit unset = readonly
+                perms.set_readonly(readonly);
+                fs::set_permissions(&path, perms)?;
+            }
         }
     }
 
@@ -1017,21 +1075,63 @@ pub fn restore_working_tree(commit_hash: String) -> anyhow::Result<()> {
             if flags >= (1 << 12) {
                 return Err(anyhow!("Invalid flags"));
             }
-            let meta = fs::metadata(path)?; // stat the just-written file
+            let st = fs::metadata(path)?; // stat the just-written file
             Ok(IndexEntry {
                 mode: *mode,
                 path: path.clone(),
                 sha1: hex::decode(sha1)?.try_into().unwrap(),
-                ctime_s: meta.ctime() as u32,
-                ctime_n: meta.ctime_nsec() as u32,
-                mtime_s: meta.mtime() as u32,
-                mtime_n: meta.mtime_nsec() as u32,
-                size: meta.size() as u32,
-                ino: meta.ino() as u32,
-                dev: meta.dev() as u32,
-                uid: meta.uid(),
-                gid: meta.gid(),
+                size: st.len() as u32,
                 flags,
+
+                #[cfg(unix)]
+                ctime_s: st.ctime() as u32,
+                #[cfg(not(unix))]
+                ctime_s: st
+                    .created()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as u32)
+                    .unwrap_or(0),
+
+                #[cfg(unix)]
+                ctime_n: st.ctime_nsec() as u32,
+                #[cfg(not(unix))]
+                ctime_n: 0,
+
+                #[cfg(unix)]
+                mtime_s: st.mtime() as u32,
+                #[cfg(not(unix))]
+                mtime_s: st
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as u32)
+                    .unwrap_or(0),
+
+                #[cfg(unix)]
+                mtime_n: st.mtime_nsec() as u32,
+                #[cfg(not(unix))]
+                mtime_n: 0,
+
+                #[cfg(unix)]
+                dev: st.dev() as u32,
+                #[cfg(not(unix))]
+                dev: 0,
+
+                #[cfg(unix)]
+                ino: st.ino() as u32,
+                #[cfg(not(unix))]
+                ino: 0,
+
+                #[cfg(unix)]
+                uid: st.uid(),
+                #[cfg(not(unix))]
+                uid: 0,
+
+                #[cfg(unix)]
+                gid: st.gid(),
+                #[cfg(not(unix))]
+                gid: 0,
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -1210,6 +1310,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_read_object_roundtrip() {
         let data = b"roundtrip data".to_vec();
         let hash = hash_object(&mut data.clone(), ObjectType::Blob, true).unwrap();
